@@ -1,15 +1,16 @@
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
 use anyhow::Context as _;
 use editor::{EditorSettings, items::entry_git_aware_label_color};
 use file_icons::FileIcons;
-use gpui::{
-    AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable,
-    Image, InteractiveElement, IntoElement, ObjectFit, ParentElement, Render, Styled,
-    Task, WeakEntity, Window, div, img, prelude::*,
-};
 use gpui::FontWeight;
+use gpui::{
+    AnyElement, App, Context, Entity, EventEmitter, FocusHandle, Focusable, Image,
+    InteractiveElement, IntoElement, ObjectFit, ParentElement, Render, Styled, Task, WeakEntity,
+    Window, div, img, prelude::*,
+};
 use language::File as _;
 use project::{PdfItem, Project, ProjectPath, pdf_store::render_pdf_page_to_image};
 use settings::Settings;
@@ -28,6 +29,7 @@ use crate::persistence::PDF_VIEWER_DB;
 struct PdfPageContent {
     image: Arc<Image>,
     page_number: usize,
+    scale_factor: f32,
 }
 
 pub struct PdfViewer {
@@ -37,6 +39,9 @@ pub struct PdfViewer {
     current_page: usize,
     page_content: Option<PdfPageContent>,
     load_task: Option<Task<()>>,
+    zoom_level: f32,
+    page_cache: HashMap<usize, PdfPageContent>,
+    scroll_offset: f32,
 }
 
 impl PdfViewer {
@@ -55,6 +60,9 @@ impl PdfViewer {
             current_page: 0,
             page_content: None,
             load_task: None,
+            zoom_level: 1.0,
+            page_cache: HashMap::new(),
+            scroll_offset: 0.0,
         };
 
         viewer.load_current_page(cx);
@@ -62,6 +70,16 @@ impl PdfViewer {
     }
 
     fn load_current_page(&mut self, cx: &mut Context<Self>) {
+        let scale_factor = self.zoom_level;
+
+        if let Some(cached) = self.page_cache.get(&self.current_page) {
+            if (cached.scale_factor - scale_factor).abs() < 0.01 {
+                self.page_content = Some(cached.clone());
+                cx.notify();
+                return;
+            }
+        }
+
         let pdf_item = self.pdf_item.clone();
         let page_number = self.current_page;
 
@@ -72,12 +90,19 @@ impl PdfViewer {
             });
 
             if let Ok(Some(metadata)) = result {
-                let page_image = Self::render_page_image(&metadata.bytes, page_number).await;
+                let page_image =
+                    Self::render_page_image(&metadata.bytes, page_number, scale_factor).await;
 
                 let _ = this.update(cx, |this, cx| {
                     match page_image {
                         Ok(image) => {
-                            this.page_content = Some(PdfPageContent { image, page_number });
+                            let content = PdfPageContent {
+                                image,
+                                page_number,
+                                scale_factor,
+                            };
+                            this.page_cache.insert(page_number, content.clone());
+                            this.page_content = Some(content);
                         }
                         Err(e) => {
                             log::error!("Failed to render PDF page: {e:?}");
@@ -89,9 +114,31 @@ impl PdfViewer {
         }));
     }
 
-    async fn render_page_image(bytes: &[u8], page_number: usize) -> anyhow::Result<Arc<Image>> {
+    async fn render_page_image(
+        bytes: &[u8],
+        page_number: usize,
+        scale_factor: f32,
+    ) -> anyhow::Result<Arc<Image>> {
         let bytes = bytes.to_vec();
-        render_pdf_page_to_image(&bytes, page_number, 2.0)
+        render_pdf_page_to_image(&bytes, page_number, scale_factor)
+    }
+
+    fn zoom_in(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.zoom_level = (self.zoom_level * 1.2).min(5.0);
+        self.page_cache.clear();
+        self.load_current_page(cx);
+    }
+
+    fn zoom_out(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.zoom_level = (self.zoom_level / 1.2).max(0.2);
+        self.page_cache.clear();
+        self.load_current_page(cx);
+    }
+
+    fn zoom_reset(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        self.zoom_level = 1.0;
+        self.page_cache.clear();
+        self.load_current_page(cx);
     }
 
     fn next_page(&mut self, _: &mut Window, cx: &mut Context<Self>) {
@@ -110,12 +157,7 @@ impl PdfViewer {
         }
     }
 
-    fn on_pdf_event(
-        &mut self,
-        _: Entity<PdfItem>,
-        event: &PdfItemEvent,
-        cx: &mut Context<Self>,
-    ) {
+    fn on_pdf_event(&mut self, _: Entity<PdfItem>, event: &PdfItemEvent, cx: &mut Context<Self>) {
         match event {
             PdfItemEvent::FileChanged => {
                 cx.emit(PdfViewerEvent::TitleChanged);
@@ -193,12 +235,7 @@ impl Item for PdfViewer {
     }
 
     fn tab_content_text(&self, _: usize, cx: &App) -> SharedString {
-        self.pdf_item
-            .read(cx)
-            .file
-            .file_name(cx)
-            .to_string()
-            .into()
+        self.pdf_item.read(cx).file.file_name(cx).to_string().into()
     }
 
     fn tab_icon(&self, _: &Window, cx: &App) -> Option<Icon> {
@@ -250,6 +287,9 @@ impl Item for PdfViewer {
             current_page: self.current_page,
             page_content: self.page_content.clone(),
             load_task: None,
+            zoom_level: self.zoom_level,
+            page_cache: self.page_cache.clone(),
+            scroll_offset: self.scroll_offset,
         })))
     }
 
@@ -308,9 +348,7 @@ impl SerializableItem for PdfViewer {
                 .update(cx, |project, cx| project.open_pdf(project_path, cx))?
                 .await?;
 
-            cx.update(
-                |window, cx| Ok(cx.new(|cx| PdfViewer::new(pdf_item, project, window, cx))),
-            )?
+            cx.update(|window, cx| Ok(cx.new(|cx| PdfViewer::new(pdf_item, project, window, cx))))?
         })
     }
 
@@ -320,13 +358,7 @@ impl SerializableItem for PdfViewer {
         _window: &mut Window,
         cx: &mut App,
     ) -> Task<anyhow::Result<()>> {
-        delete_unloaded_items(
-            alive_items,
-            workspace_id,
-            "pdf_viewers",
-            &PDF_VIEWER_DB,
-            cx,
-        )
+        delete_unloaded_items(alive_items, workspace_id, "pdf_viewers", &PDF_VIEWER_DB, cx)
     }
 
     fn serialize(
@@ -374,9 +406,10 @@ impl Render for PdfViewer {
         let mut page_info_str = String::new();
         if let Some(ref content) = self.page_content {
             page_info_str = format!(
-                "Page {} of {}",
+                "Page {} of {} | Zoom: {:.0}%",
                 content.page_number + 1,
-                page_count
+                page_count,
+                self.zoom_level * 100.0
             );
         }
 
@@ -390,7 +423,7 @@ impl Render for PdfViewer {
                     .child(
                         img(content.image)
                             .object_fit(ObjectFit::Contain)
-                            .max_w_full()
+                            .max_w_full(),
                     )
                     .into_any_element()
             } else {
@@ -404,11 +437,7 @@ impl Render for PdfViewer {
                 .justify_center()
                 .h_full()
                 .gap_2()
-                .child(
-                    div()
-                        .text_lg()
-                        .child("Loading PDF..."),
-                )
+                .child(div().text_lg().child("Loading PDF..."))
                 .child(
                     div()
                         .text_sm()
@@ -456,6 +485,22 @@ impl Render for PdfViewer {
                             .flex()
                             .items_center()
                             .gap_2()
+                            .child(Button::new("zoom-out", "-").on_click(cx.listener(
+                                |this, _event, window, cx| {
+                                    this.zoom_out(window, cx);
+                                },
+                            )))
+                            .child(Button::new("zoom-reset", "Reset").on_click(cx.listener(
+                                |this, _event, window, cx| {
+                                    this.zoom_reset(window, cx);
+                                },
+                            )))
+                            .child(Button::new("zoom-in", "+").on_click(cx.listener(
+                                |this, _event, window, cx| {
+                                    this.zoom_in(window, cx);
+                                },
+                            )))
+                            .child(div().h_6().w_px().bg(cx.theme().colors().border))
                             .child(
                                 Button::new("previous-page", "<")
                                     .disabled(self.current_page == 0)
@@ -465,7 +510,9 @@ impl Render for PdfViewer {
                             )
                             .child(
                                 Button::new("next-page", ">")
-                                    .disabled(page_count == 0 || self.current_page + 1 >= page_count)
+                                    .disabled(
+                                        page_count == 0 || self.current_page + 1 >= page_count,
+                                    )
                                     .on_click(cx.listener(|this, _event, window, cx| {
                                         this.next_page(window, cx);
                                     })),
@@ -474,10 +521,7 @@ impl Render for PdfViewer {
             )
             .child(
                 // Content area
-                div()
-                    .flex_1()
-                    .p_4()
-                    .child(content_area),
+                div().flex_1().child(content_area),
             )
     }
 }
