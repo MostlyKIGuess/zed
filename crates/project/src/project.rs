@@ -8,9 +8,9 @@ pub mod debugger;
 pub mod git_store;
 pub mod image_store;
 pub mod lsp_command;
-pub mod pdf_store;
 pub mod lsp_store;
 mod manifest_tree;
+pub mod pdf_store;
 pub mod prettier_store;
 mod project_search;
 pub mod project_settings;
@@ -2989,9 +2989,8 @@ impl Project {
             return Task::ready(Err(anyhow!(ErrorCode::Disconnected)));
         }
 
-        self.pdf_store.update(cx, |pdf_store, cx| {
-            pdf_store.open_pdf(path.into(), cx)
-        })
+        self.pdf_store
+            .update(cx, |pdf_store, cx| pdf_store.open_pdf(path.into(), cx))
     }
 
     async fn send_buffer_ordered_messages(
