@@ -145,6 +145,7 @@ impl PdfViewer {
         if let Some(metadata) = self.pdf_item.read(cx).metadata.as_ref() {
             if self.current_page + 1 < metadata.page_count {
                 self.current_page += 1;
+                self.scroll_offset = 0.0;
                 self.load_current_page(cx);
             }
         }
@@ -153,6 +154,7 @@ impl PdfViewer {
     fn previous_page(&mut self, _: &mut Window, cx: &mut Context<Self>) {
         if self.current_page > 0 {
             self.current_page -= 1;
+            self.scroll_offset = 0.0;
             self.load_current_page(cx);
         }
     }
@@ -420,6 +422,7 @@ impl Render for PdfViewer {
                     .flex_col()
                     .items_center()
                     .gap_2()
+                    .mt(px(self.scroll_offset))
                     .child(
                         img(content.image)
                             .object_fit(ObjectFit::Contain)
@@ -453,6 +456,11 @@ impl Render for PdfViewer {
             .flex()
             .flex_col()
             .bg(cx.theme().colors().background)
+            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _window, cx| {
+                let delta: gpui::Point<gpui::Pixels> = event.delta.pixel_delta(1.0.into());
+                this.scroll_offset -= f32::from(delta.y);
+                cx.notify();
+            }))
             .child(
                 // Toolbar
                 div()
@@ -521,7 +529,11 @@ impl Render for PdfViewer {
             )
             .child(
                 // Content area
-                div().flex_1().child(content_area),
+                div()
+                    .flex_1()
+                    .overflow_hidden()
+                    .relative()
+                    .child(content_area),
             )
     }
 }
