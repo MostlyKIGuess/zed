@@ -1,0 +1,42 @@
+[package]
+name = "pdf_viewer"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+license = "GPL-3.0-or-later"
+
+[lints]
+workspace = true
+
+[lib]
+path = "src/pdf_viewer.rs"
+doctest = false
+
+[features]
+test-support = ["gpui/test-support", "editor/test-support"]
+
+[dependencies]
+anyhow.workspace = true
+db.workspace = true
+editor.workspace = true
+file_icons.workspace = true
+gpui.workspace = true
+image.workspace = true
+language.workspace = true
+log.workspace = true
+pdfium-render = "0.8"
+project.workspace = true
+serde.workspace = true
+settings.workspace = true
+theme.workspace = true
+ui.workspace = true
+util.workspace = true
+workspace.workspace = true
+
+[dev-dependencies]
+editor = { workspace = true, features = ["test-support"] }
+
+[build-dependencies]
+flate2 = "1.0"
+tar = { version = "0.4", default-features = false }
+reqwest = { version = "0.12", features = ["blocking"] }

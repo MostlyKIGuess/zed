@@ -8,6 +8,7 @@ pub mod debugger;
 pub mod git_store;
 pub mod image_store;
 pub mod lsp_command;
+pub mod pdf_store;
 pub mod lsp_store;
 mod manifest_tree;
 pub mod prettier_store;
@@ -76,6 +77,7 @@ use futures::{
 };
 pub use image_store::{ImageItem, ImageStore};
 use image_store::{ImageItemEvent, ImageStoreEvent};
+pub use pdf_store::{PdfItem, PdfStore};
 
 use ::git::{blame::Blame, status::FileStatus};
 use gpui::{
@@ -205,6 +207,7 @@ pub struct Project {
     buffer_store: Entity<BufferStore>,
     context_server_store: Entity<ContextServerStore>,
     image_store: Entity<ImageStore>,
+    pdf_store: Entity<PdfStore>,
     lsp_store: Entity<LspStore>,
     _subscriptions: Vec<gpui::Subscription>,
     buffers_needing_diff: HashSet<WeakEntity<Buffer>>,
@@ -1139,6 +1142,8 @@ impl Project {
             cx.subscribe(&image_store, Self::on_image_store_event)
                 .detach();
 
+            let pdf_store = cx.new(|_cx| PdfStore::new(worktree_store.clone()));
+
             let prettier_store = cx.new(|cx| {
                 PrettierStore::new(
                     node.clone(),
@@ -1217,6 +1222,7 @@ impl Project {
                 worktree_store,
                 buffer_store,
                 image_store,
+                pdf_store,
                 lsp_store,
                 context_server_store,
                 join_project_response_message_id: 0,
@@ -1427,6 +1433,9 @@ impl Project {
             let agent_server_store =
                 cx.new(|_| AgentServerStore::remote(REMOTE_SERVER_PROJECT_ID, remote.clone()));
 
+            // For remote projects, we create a local pdf_store (PDFs not synced for now)
+            let pdf_store = cx.new(|_cx| PdfStore::new(worktree_store.clone()));
+
             cx.subscribe(&remote, Self::on_remote_client_event).detach();
 
             let this = Self {
@@ -1435,6 +1444,7 @@ impl Project {
                 worktree_store,
                 buffer_store,
                 image_store,
+                pdf_store,
                 lsp_store,
                 context_server_store,
                 breakpoint_store,
@@ -1600,6 +1610,7 @@ impl Project {
         let image_store = cx.new(|cx| {
             ImageStore::remote(worktree_store.clone(), client.clone().into(), remote_id, cx)
         })?;
+        let pdf_store = cx.new(|_cx| PdfStore::new(worktree_store.clone()))?;
 
         let environment =
             cx.new(|cx| ProjectEnvironment::new(None, worktree_store.downgrade(), None, true, cx))?;
@@ -1705,6 +1716,7 @@ impl Project {
                 buffer_ordered_messages_tx: tx,
                 buffer_store: buffer_store.clone(),
                 image_store,
+                pdf_store,
                 worktree_store: worktree_store.clone(),
                 lsp_store: lsp_store.clone(),
                 context_server_store,
@@ -2965,6 +2977,20 @@ impl Project {
             }
 
             Ok(image_item)
+        })
+    }
+
+    pub fn open_pdf(
+        &mut self,
+        path: impl Into<ProjectPath>,
+        cx: &mut Context<Self>,
+    ) -> Task<Result<Entity<PdfItem>>> {
+        if self.is_disconnected(cx) {
+            return Task::ready(Err(anyhow!(ErrorCode::Disconnected)));
+        }
+
+        self.pdf_store.update(cx, |pdf_store, cx| {
+            pdf_store.open_pdf(path.into(), cx)
         })
     }
 
