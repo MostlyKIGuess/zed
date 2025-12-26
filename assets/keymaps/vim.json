@@ -1097,4 +1097,20 @@
       "ctrl-e": "markdown::ScrollDown",
     },
   },
+  {
+    "context": "PdfViewer",
+    "bindings": {
+      "g g": "pdf_viewer::GoToFirstPage",
+      "shift-g": "pdf_viewer::GoToLastPage",
+      "z z": "pdf_viewer::ZoomReset",
+      "j": "pdf_viewer::ScrollDown",
+      "k": "pdf_viewer::ScrollUp",
+      "J": "pdf_viewer::NextPage",
+      "K": "pdf_viewer::PreviousPage",
+      "ctrl-n": "pdf_viewer::NextPage",
+      "ctrl-p": "pdf_viewer::PreviousPage",
+      "ctrl-u": "pdf_viewer::PageUp",
+      "ctrl-d": "pdf_viewer::PageDown",
+    },
+  },
 ]

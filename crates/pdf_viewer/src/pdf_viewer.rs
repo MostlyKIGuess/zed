@@ -533,10 +533,17 @@ impl PdfViewer {
     }
 
     fn clamp_scroll(&mut self, cx: &Context<Self>) {
-        if self.view_mode == ViewMode::ContinuousScroll {
-            let total_height = self.calculate_total_height(cx);
-            let min_scroll = -(total_height - self.view_height).max(0.0);
-            self.scroll_offset = self.scroll_offset.clamp(min_scroll, 0.0);
+        match self.view_mode {
+            ViewMode::SinglePage | ViewMode::DualPage => {
+                let page_height = self.get_page_height(self.current_page);
+                let min_scroll = -(page_height - self.view_height).max(0.0);
+                self.scroll_offset = self.scroll_offset.clamp(min_scroll, 0.0);
+            }
+            ViewMode::ContinuousScroll => {
+                let total_height = self.calculate_total_height(cx);
+                let min_scroll = -(total_height - self.view_height).max(0.0);
+                self.scroll_offset = self.scroll_offset.clamp(min_scroll, 0.0);
+            }
         }
     }
 
