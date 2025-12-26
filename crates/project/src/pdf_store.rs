@@ -1,14 +1,16 @@
 use std::{collections::HashMap, path::PathBuf, sync::Arc};
 
-use gpui::{App, AppContext, Context, Entity, EventEmitter, Image, Task, WeakEntity};
+use gpui::{App, AppContext, Context, Entity, EventEmitter, Task, WeakEntity};
+use image::{Frame, RgbaImage};
 use language::{DiskState, File as _};
+use smallvec::SmallVec;
 
 use crate::{Project, ProjectEntryId, ProjectItem, ProjectPath, worktree_store::WorktreeStore};
 
 #[derive(Debug, Clone)]
 pub struct PdfMetadata {
     pub page_count: usize,
-    pub bytes: Vec<u8>,
+    pub bytes: Arc<Vec<u8>>,
 }
 
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
@@ -41,7 +43,6 @@ pub struct PdfItem {
     pub id: PdfId,
     pub file: Arc<worktree::File>,
     pub metadata: Option<PdfMetadata>,
-    pub page_images: Vec<Option<Arc<Image>>>,
 }
 
 impl PdfItem {
@@ -144,7 +145,6 @@ impl PdfStore {
             return Task::ready(Err(anyhow::anyhow!("no such worktree")));
         };
 
-        let project_path_clone = project_path.clone();
         cx.spawn(async move |this, cx| {
             let (entry_id, is_private, mtime) = worktree.update(cx, |worktree, _cx| {
                 let entry = worktree.entry_for_path(&path);
@@ -166,7 +166,7 @@ impl PdfStore {
                 .await?
                 .content;
 
-            let metadata = load_pdf_metadata(pdf_bytes.clone())?;
+            let metadata = load_pdf_metadata(pdf_bytes)?;
 
             this.update(cx, |this, cx| {
                 let pdf_id = PdfId::new();
@@ -179,15 +179,13 @@ impl PdfStore {
                     is_private,
                 });
 
-                let page_count = metadata.page_count;
                 let pdf = cx.new(|_cx| PdfItem {
                     id: pdf_id,
                     file,
                     metadata: Some(metadata),
-                    page_images: vec![None; page_count],
                 });
 
-                this.pdfs_by_path.insert(project_path_clone, pdf_id);
+                this.pdfs_by_path.insert(project_path, pdf_id);
                 this.opened_pdfs.insert(pdf_id, pdf.downgrade());
                 Ok(pdf)
             })?
@@ -214,62 +212,134 @@ fn load_pdf_metadata(bytes: Vec<u8>) -> anyhow::Result<PdfMetadata> {
     let doc = Document::load_mem(&bytes)?;
     let page_count = doc.get_pages().len();
 
-    Ok(PdfMetadata { page_count, bytes })
+    Ok(PdfMetadata {
+        page_count,
+        bytes: Arc::new(bytes),
+    })
+}
+
+pub struct RenderedPage {
+    pub data: SmallVec<[Frame; 1]>,
+    pub width: u32,
+    pub height: u32,
+}
+
+thread_local! {
+    static PDFIUM_BINDINGS: std::cell::RefCell<Option<pdfium_render::prelude::Pdfium>> = const { std::cell::RefCell::new(None) };
+}
+
+fn with_pdfium<T, F>(f: F) -> anyhow::Result<T>
+where
+    F: FnOnce(&pdfium_render::prelude::Pdfium) -> anyhow::Result<T>,
+{
+    use pdfium_render::prelude::*;
+
+    PDFIUM_BINDINGS.with(|cell| {
+        let mut borrow = cell.borrow_mut();
+        if borrow.is_none() {
+            let bindings = Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(
+                "crates/pdf_viewer/lib/",
+            ))
+            .or_else(|_| {
+                Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./"))
+            })
+            .or_else(|_| Pdfium::bind_to_system_library())
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "Failed to bind to pdfium library: {}. Ensure pdfium binaries are available.",
+                    e
+                )
+            })?;
+            *borrow = Some(Pdfium::new(bindings));
+        }
+        f(borrow.as_ref().expect("pdfium was just initialized"))
+    })
+}
+
+pub fn render_pdf_page_to_raw(
+    bytes: &[u8],
+    page_number: usize,
+    scale_factor: f32,
+) -> anyhow::Result<RenderedPage> {
+    use pdfium_render::prelude::*;
+
+    with_pdfium(|pdfium| {
+        let document = pdfium.load_pdf_from_byte_slice(bytes, None)?;
+        let page = document.pages().get(page_number as u16)?;
+
+        let page_width = page.width().value;
+        let page_height = page.height().value;
+
+        let target_width = (page_width * scale_factor) as i32;
+        let target_height = (page_height * scale_factor) as i32;
+
+        let render_config = PdfRenderConfig::new()
+            .set_target_width(target_width)
+            .set_target_height(target_height)
+            .set_reverse_byte_order(true);
+
+        let bitmap = page.render_with_config(&render_config)?;
+        let dynamic_image = bitmap.as_image();
+        let rgba_image = dynamic_image.to_rgba8();
+
+        let width = rgba_image.width();
+        let height = rgba_image.height();
+
+        let mut buffer = RgbaImage::from_raw(width, height, rgba_image.into_raw())
+            .ok_or_else(|| anyhow::anyhow!("Failed to create RGBA image buffer"))?;
+
+        for pixel in buffer.chunks_exact_mut(4) {
+            pixel.swap(0, 2);
+        }
+
+        let frame = Frame::new(buffer);
+
+        Ok(RenderedPage {
+            data: SmallVec::from_elem(frame, 1),
+            width,
+            height,
+        })
+    })
 }
 
 pub fn render_pdf_page_to_image(
     bytes: &[u8],
     page_number: usize,
     scale_factor: f32,
-) -> anyhow::Result<Arc<Image>> {
+) -> anyhow::Result<Arc<gpui::Image>> {
     use pdfium_render::prelude::*;
 
-    // Try to bind to pdfium:
-    // 1. The bundled library in crates/pdf_viewer/lib/
-    // 2. Local directory (for development)
-    // 3. System library
-    let pdfium = Pdfium::new(
-        Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(
-            "crates/pdf_viewer/lib/",
-        ))
-        .or_else(|_| Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./")))
-        .or_else(|_| Pdfium::bind_to_system_library())
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "Failed to bind to pdfium library: {}. Ensure pdfium binaries are available.",
-                e
+    with_pdfium(|pdfium| {
+        let document = pdfium.load_pdf_from_byte_slice(bytes, None)?;
+        let page = document.pages().get(page_number as u16)?;
+
+        let page_width = page.width().value;
+        let page_height = page.height().value;
+
+        let target_width = (page_width * scale_factor) as i32;
+        let target_height = (page_height * scale_factor) as i32;
+
+        let render_config = PdfRenderConfig::new()
+            .set_target_width(target_width)
+            .set_target_height(target_height)
+            .set_reverse_byte_order(true);
+
+        let bitmap = page.render_with_config(&render_config)?;
+        let dynamic_image = bitmap.as_image();
+
+        let mut buffer = Vec::new();
+        dynamic_image
+            .write_to(
+                &mut std::io::Cursor::new(&mut buffer),
+                image::ImageFormat::Png,
             )
-        })?,
-    );
+            .map_err(|e| anyhow::anyhow!("Failed to write image buffer: {}", e))?;
 
-    let document = pdfium.load_pdf_from_byte_slice(bytes, None)?;
-
-    let page = document.pages().get(page_number as u16)?;
-
-    let page_width = page.width().value;
-    let page_height = page.height().value;
-
-    let target_width = (page_width * scale_factor) as i32;
-    let target_height = (page_height * scale_factor) as i32;
-
-    let render_config = PdfRenderConfig::new()
-        .set_target_width(target_width)
-        .set_target_height(target_height)
-        .set_reverse_byte_order(true);
-
-    let bitmap = page.render_with_config(&render_config)?;
-
-    let dynamic_image = bitmap.as_image();
-
-    let mut buffer = Vec::new();
-    dynamic_image
-        .write_to(
-            &mut std::io::Cursor::new(&mut buffer),
-            image::ImageFormat::Png,
-        )
-        .map_err(|e| anyhow::anyhow!("Failed to write image buffer: {}", e))?;
-
-    Ok(Arc::new(Image::from_bytes(gpui::ImageFormat::Png, buffer)))
+        Ok(Arc::new(gpui::Image::from_bytes(
+            gpui::ImageFormat::Png,
+            buffer,
+        )))
+    })
 }
 
 pub fn extract_page_text(bytes: &[u8], page_number: usize) -> anyhow::Result<String> {
