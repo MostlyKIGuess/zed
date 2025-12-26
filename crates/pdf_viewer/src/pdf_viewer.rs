@@ -90,8 +90,8 @@ impl PdfViewer {
             });
 
             if let Ok(Some(metadata)) = result {
-                let page_image =
-                    Self::render_page_image(&metadata.bytes, page_number, scale_factor).await;
+                let bytes = metadata.bytes.clone();
+                let page_image = Self::render_page_image(&bytes, page_number, scale_factor).await;
 
                 let _ = this.update(cx, |this, cx| {
                     match page_image {
@@ -456,11 +456,32 @@ impl Render for PdfViewer {
             .flex()
             .flex_col()
             .bg(cx.theme().colors().background)
-            .on_scroll_wheel(cx.listener(|this, event: &gpui::ScrollWheelEvent, _window, cx| {
-                let delta: gpui::Point<gpui::Pixels> = event.delta.pixel_delta(1.0.into());
-                this.scroll_offset -= f32::from(delta.y);
-                cx.notify();
-            }))
+            .on_scroll_wheel(
+                cx.listener(|this, event: &gpui::ScrollWheelEvent, _window, cx| {
+                    let (_, _, dy) = match event.delta {
+                        gpui::ScrollDelta::Pixels(p) => ("pixels", f32::from(p.x), f32::from(p.y)),
+                        gpui::ScrollDelta::Lines(l) => ("lines", l.x * 20.0, l.y * 20.0),
+                    };
+
+                    // check for Ctrl/Cmd
+                    if event.control || event.platform {
+                        let zoom_delta = dy * 0.003;
+                        let new_zoom = (this.zoom_level - zoom_delta).max(0.2).min(5.0);
+
+                        if (new_zoom - this.zoom_level).abs() > 0.01 {
+                            this.zoom_level = new_zoom;
+                            this.page_cache.retain(|_, cached| {
+                                (cached.scale_factor - this.zoom_level).abs() < 0.01
+                            });
+                            this.load_current_page(cx);
+                        }
+                    } else {
+                        // somehow this is making natural on touchpad instead of -dy
+                        this.scroll_offset += dy;
+                        cx.notify();
+                    }
+                }),
+            )
             .child(
                 // Toolbar
                 div()
