@@ -31,8 +31,11 @@ use crate::persistence::PDF_VIEWER_DB;
 #[derive(Clone)]
 struct PdfPageContent {
     image: Arc<RenderImage>,
+    #[allow(dead_code)]
     page_number: usize,
+    #[allow(dead_code)]
     scale_factor: f32,
+    height: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -86,24 +89,25 @@ pub struct PdfViewer {
     project: Entity<Project>,
     focus_handle: FocusHandle,
     current_page: usize,
-    page_content: Option<PdfPageContent>,
-    secondary_page_content: Option<PdfPageContent>,
-    load_task: Option<Task<()>>,
     zoom_level: f32,
     page_cache: HashMap<usize, PdfPageContent>,
     scroll_offset: f32,
     view_height: f32,
     view_mode: ViewMode,
     is_loading: bool,
-    loading_progress: f32,
+    loading_pages: HashMap<usize, u64>,
     show_settings_menu: bool,
     text_selection: TextSelection,
+    visible_pages: Vec<usize>,
+    render_generation: u64,
 }
 
-const SCROLL_AMOUNT: f32 = 50.0;
-const PAGE_SCROLL_AMOUNT: f32 = 400.0;
+const SCROLL_AMOUNT: f32 = 80.0;
+const PAGE_SCROLL_AMOUNT: f32 = 500.0;
 const MIN_ZOOM: f32 = 0.2;
 const MAX_ZOOM: f32 = 5.0;
+const PAGE_GAP: f32 = 20.0;
+const ESTIMATED_PAGE_HEIGHT: f32 = 800.0;
 
 impl PdfViewer {
     pub fn new(
@@ -119,200 +123,370 @@ impl PdfViewer {
             project,
             focus_handle: cx.focus_handle(),
             current_page: 0,
-            page_content: None,
-            secondary_page_content: None,
-            load_task: None,
             zoom_level: 1.0,
             page_cache: HashMap::new(),
             scroll_offset: 0.0,
             view_height: 600.0,
             view_mode: ViewMode::default(),
             is_loading: true,
-            loading_progress: 0.0,
+            loading_pages: HashMap::new(),
             show_settings_menu: false,
             text_selection: TextSelection::default(),
+            visible_pages: vec![0],
+            render_generation: 0,
         };
 
-        viewer.load_current_page(cx);
+        // log::info!(
+        //     "PdfViewer::new - initial load, generation: {}",
+        //     viewer.render_generation
+        // );
+        viewer.load_visible_pages(cx);
         viewer
     }
 
-    fn load_current_page(&mut self, cx: &mut Context<Self>) {
-        let scale_factor = self.zoom_level;
-        self.is_loading = true;
-        self.loading_progress = 0.0;
-        cx.notify();
+    fn page_count(&self, cx: &Context<Self>) -> usize {
+        self.pdf_item
+            .read(cx)
+            .metadata
+            .as_ref()
+            .map(|m| m.page_count)
+            .unwrap_or(0)
+    }
 
-        if let Some(cached) = self.page_cache.get(&self.current_page) {
-            if (cached.scale_factor - scale_factor).abs() < 0.01 {
-                self.page_content = Some(cached.clone());
-                self.is_loading = false;
+    fn get_page_height(&self, page: usize) -> f32 {
+        if let Some(content) = self.page_cache.get(&page) {
+            content.height
+        } else {
+            ESTIMATED_PAGE_HEIGHT * self.zoom_level
+        }
+    }
 
-                if self.view_mode == ViewMode::DualPage {
-                    self.load_secondary_page(cx);
-                } else {
-                    self.secondary_page_content = None;
-                    cx.notify();
-                }
-                return;
-            }
+    fn calculate_visible_pages(&self, cx: &Context<Self>) -> Vec<usize> {
+        let page_count = self.page_count(cx);
+        if page_count == 0 {
+            return vec![];
         }
 
-        let pdf_item = self.pdf_item.clone();
-        let page_number = self.current_page;
-        let view_mode = self.view_mode;
+        match self.view_mode {
+            ViewMode::SinglePage => vec![self.current_page],
+            ViewMode::DualPage => {
+                let mut pages = vec![self.current_page];
+                if self.current_page + 1 < page_count {
+                    pages.push(self.current_page + 1);
+                }
+                pages
+            }
+            ViewMode::ContinuousScroll => {
+                let mut pages = Vec::new();
+                let mut y_offset = 0.0;
+                let scroll = -self.scroll_offset;
+                let view_top = scroll;
+                let view_bottom = scroll + self.view_height + 200.0;
 
-        self.load_task = Some(cx.spawn(async move |this, cx| {
-            let bytes = cx.update(|cx| {
+                for page in 0..page_count {
+                    let page_height = self.get_page_height(page);
+                    let page_top = y_offset;
+                    let page_bottom = y_offset + page_height;
+
+                    if page_bottom >= view_top && page_top <= view_bottom {
+                        pages.push(page);
+                    }
+
+                    y_offset += page_height + PAGE_GAP;
+
+                    if page_top > view_bottom {
+                        break;
+                    }
+                }
+
+                if pages.is_empty() && page_count > 0 {
+                    pages.push(0);
+                }
+
+                pages
+            }
+        }
+    }
+
+    fn load_visible_pages(&mut self, cx: &mut Context<Self>) {
+        let old_visible = self.visible_pages.clone();
+        let new_visible = self.calculate_visible_pages(cx);
+
+        let cache_has_all_visible =
+            !new_visible.is_empty() && new_visible.iter().all(|p| self.page_cache.contains_key(p));
+
+        if new_visible == old_visible && cache_has_all_visible {
+            return;
+        }
+
+        self.visible_pages = new_visible.clone();
+
+        // log::info!(
+        //     "load_visible_pages: visible={:?}, cached={}, loading={}, generation={}",
+        //     self.visible_pages,
+        //     self.page_cache.len(),
+        //     self.loading_pages.len(),
+        //     self.render_generation
+        // );
+
+        let pages_to_load: Vec<usize> = self
+            .visible_pages
+            .iter()
+            .filter(|&&page| {
+                !self.page_cache.contains_key(&page) && !self.loading_pages.contains_key(&page)
+            })
+            .copied()
+            .collect();
+
+        // if !pages_to_load.is_empty() {
+        //     // log::info!("Pages to load: {:?}", pages_to_load);
+        // }
+
+        // notify iff something changed
+        let something_changed = !pages_to_load.is_empty() || new_visible != old_visible;
+
+        for page in pages_to_load {
+            self.load_page(page, cx);
+        }
+
+        self.preload_adjacent_pages(cx);
+        self.update_loading_state();
+
+        if something_changed {
+            cx.notify();
+        }
+    }
+
+    fn load_page(&mut self, page_number: usize, cx: &mut Context<Self>) {
+        if self.loading_pages.contains_key(&page_number) {
+            return;
+        }
+
+        let page_count = self.page_count(cx);
+        if page_number >= page_count {
+            return;
+        }
+
+        let generation = self.render_generation;
+        // log::info!(
+        //     "Starting to load page {} (generation {})",
+        //     page_number,
+        //     generation
+        // );
+        self.loading_pages.insert(page_number, generation);
+        self.is_loading = true;
+
+        let pdf_item = self.pdf_item.clone();
+        let scale_factor = self.zoom_level;
+
+        cx.spawn(async move |this, cx| {
+            let bytes_result = cx.update(|cx| {
                 let item = pdf_item.read(cx);
                 item.metadata.as_ref().map(|m| m.bytes.clone())
             });
 
-            let bytes = match bytes {
+            let bytes = match bytes_result {
                 Ok(Some(bytes)) => bytes,
-                _ => return,
+                Ok(None) => {
+                    // log::warn!("No PDF metadata available for page {}", page_number);
+                    if let Err(e) = this.update(cx, |this, cx| {
+                        if this.loading_pages.get(&page_number) == Some(&generation) {
+                            this.loading_pages.remove(&page_number);
+                        }
+                        this.update_loading_state();
+                        cx.notify();
+                    }) {
+                        // log::error!("Failed to update state after missing metadata: {e:?}");
+                    }
+                    return;
+                }
+                Err(e) => {
+                    // log::error!("Failed to get PDF bytes for page {}: {e:?}", page_number);
+                    if let Err(e) = this.update(cx, |this, cx| {
+                        if this.loading_pages.get(&page_number) == Some(&generation) {
+                            this.loading_pages.remove(&page_number);
+                        }
+                        this.update_loading_state();
+                        cx.notify();
+                    }) {
+                        // log::error!("Failed to update state after error: {e:?}");
+                    }
+                    return;
+                }
             };
 
-            let _ = this.update(cx, |this, cx| {
-                this.loading_progress = 0.3;
-                cx.notify();
-            });
-
-            let page_image = cx
+            let render_result = cx
                 .background_spawn({
                     let bytes = bytes.clone();
                     async move { render_pdf_page_to_raw(&bytes, page_number, scale_factor) }
                 })
                 .await;
 
-            let _ = this.update(cx, |this, cx| {
-                this.loading_progress = 0.8;
-                cx.notify();
-            });
+            if let Err(e) = this.update(cx, |this, cx| {
+                let current_generation = this.render_generation;
 
-            let _ = this.update(cx, |this, cx| {
-                match page_image {
+                if generation != current_generation {
+                    // log::info!(
+                    //     "Discarding stale render for page {} (generation {} vs current {})",
+                    //     page_number,
+                    //     generation,
+                    //     current_generation
+                    // );
+                    if this.loading_pages.get(&page_number) == Some(&generation) {
+                        this.loading_pages.remove(&page_number);
+                    }
+                    this.update_loading_state();
+                    cx.notify();
+                    return;
+                }
+
+                this.loading_pages.remove(&page_number);
+
+                match render_result {
                     Ok(rendered) => {
+                        // log::info!(
+                        //     "Successfully rendered page {} ({}x{}, generation {})",
+                        //     page_number,
+                        //     rendered.width,
+                        //     rendered.height,
+                        //     generation
+                        // );
+                        let height = rendered.height as f32;
                         let render_image = Arc::new(RenderImage::new(rendered.data));
                         let content = PdfPageContent {
                             image: render_image,
                             page_number,
                             scale_factor,
+                            height,
                         };
-                        this.page_cache.insert(page_number, content.clone());
-                        this.page_content = Some(content);
-                        this.is_loading = false;
-                        this.loading_progress = 1.0;
-
-                        if view_mode == ViewMode::DualPage {
-                            this.load_secondary_page(cx);
-                        } else {
-                            this.secondary_page_content = None;
-                        }
+                        this.page_cache.insert(page_number, content);
                     }
                     Err(e) => {
-                        log::error!("Failed to render PDF page: {e:?}");
-                        this.is_loading = false;
+                        // log::error!("Failed to render PDF page {}: {e:?}", page_number);
                     }
                 }
+
+                this.update_loading_state();
                 cx.notify();
-            });
-        }));
-    }
-
-    fn load_secondary_page(&mut self, cx: &mut Context<Self>) {
-        let page_count = self
-            .pdf_item
-            .read(cx)
-            .metadata
-            .as_ref()
-            .map(|m| m.page_count)
-            .unwrap_or(0);
-
-        let secondary_page = self.current_page + 1;
-        if secondary_page >= page_count {
-            self.secondary_page_content = None;
-            cx.notify();
-            return;
-        }
-
-        let scale_factor = self.zoom_level;
-
-        if let Some(cached) = self.page_cache.get(&secondary_page) {
-            if (cached.scale_factor - scale_factor).abs() < 0.01 {
-                self.secondary_page_content = Some(cached.clone());
-                cx.notify();
-                return;
+            }) {
+                // log::error!(
+                //     "Failed to update view after rendering page {}: {e:?}",
+                //     page_number
+                // );
             }
-        }
-
-        let pdf_item = self.pdf_item.clone();
-
-        cx.spawn(async move |this, cx| {
-            let bytes = cx.update(|cx| {
-                let item = pdf_item.read(cx);
-                item.metadata.as_ref().map(|m| m.bytes.clone())
-            });
-
-            let bytes = match bytes {
-                Ok(Some(bytes)) => bytes,
-                _ => return,
-            };
-
-            let page_image = cx
-                .background_spawn({
-                    let bytes = bytes.clone();
-                    async move { render_pdf_page_to_raw(&bytes, secondary_page, scale_factor) }
-                })
-                .await;
-
-            let _ = this.update(cx, |this, cx| {
-                if let Ok(rendered) = page_image {
-                    let render_image = Arc::new(RenderImage::new(rendered.data));
-                    let content = PdfPageContent {
-                        image: render_image,
-                        page_number: secondary_page,
-                        scale_factor,
-                    };
-                    this.page_cache.insert(secondary_page, content.clone());
-                    this.secondary_page_content = Some(content);
-                }
-                cx.notify();
-            });
         })
         .detach();
     }
 
-    fn zoom_in(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        self.zoom_level = (self.zoom_level * 1.2).min(MAX_ZOOM);
+    fn update_loading_state(&mut self) {
+        self.is_loading = !self.loading_pages.is_empty()
+            || self
+                .visible_pages
+                .iter()
+                .any(|p| !self.page_cache.contains_key(p));
+    }
+
+    fn preload_adjacent_pages(&mut self, cx: &mut Context<Self>) {
+        let page_count = self.page_count(cx);
+        if page_count == 0 {
+            return;
+        }
+
+        let mut pages_to_preload: Vec<usize> = Vec::new();
+
+        match self.view_mode {
+            ViewMode::SinglePage => {
+                if self.current_page > 0 {
+                    pages_to_preload.push(self.current_page - 1);
+                }
+                if self.current_page + 1 < page_count {
+                    pages_to_preload.push(self.current_page + 1);
+                }
+            }
+            ViewMode::DualPage => {
+                if self.current_page >= 2 {
+                    pages_to_preload.push(self.current_page - 2);
+                    pages_to_preload.push(self.current_page - 1);
+                } else if self.current_page >= 1 {
+                    pages_to_preload.push(self.current_page - 1);
+                }
+                if self.current_page + 2 < page_count {
+                    pages_to_preload.push(self.current_page + 2);
+                }
+                if self.current_page + 3 < page_count {
+                    pages_to_preload.push(self.current_page + 3);
+                }
+            }
+            ViewMode::ContinuousScroll => {
+                if let Some(&first) = self.visible_pages.first() {
+                    if first > 0 {
+                        pages_to_preload.push(first - 1);
+                    }
+                    if first > 1 {
+                        pages_to_preload.push(first - 2);
+                    }
+                }
+                if let Some(&last) = self.visible_pages.last() {
+                    if last + 1 < page_count {
+                        pages_to_preload.push(last + 1);
+                    }
+                    if last + 2 < page_count {
+                        pages_to_preload.push(last + 2);
+                    }
+                }
+            }
+        }
+
+        for page in pages_to_preload {
+            if !self.page_cache.contains_key(&page) && !self.loading_pages.contains_key(&page) {
+                self.load_page(page, cx);
+            }
+        }
+    }
+
+    fn clear_cache_and_reload(&mut self, cx: &mut Context<Self>) {
+        self.render_generation = self.render_generation.wrapping_add(1);
+        // log::info!("Clearing cache, new generation: {}", self.render_generation);
         self.page_cache.clear();
-        self.load_current_page(cx);
+        self.loading_pages.clear();
+        self.visible_pages.clear();
+        self.is_loading = true;
+        self.load_visible_pages(cx);
+    }
+
+    fn zoom_in(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        // log::info!("zoom_in called, current zoom: {}", self.zoom_level);
+        self.zoom_level = (self.zoom_level * 1.2).min(MAX_ZOOM);
+        self.clear_cache_and_reload(cx);
     }
 
     fn zoom_out(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        // log::info!("zoom_out called, current zoom: {}", self.zoom_level);
         self.zoom_level = (self.zoom_level / 1.2).max(MIN_ZOOM);
-        self.page_cache.clear();
-        self.load_current_page(cx);
+        self.clear_cache_and_reload(cx);
     }
 
     fn zoom_reset(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
         self.zoom_level = 1.0;
-        self.page_cache.clear();
-        self.load_current_page(cx);
+        self.clear_cache_and_reload(cx);
     }
 
     fn next_page(&mut self, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(metadata) = self.pdf_item.read(cx).metadata.as_ref() {
-            let increment = if self.view_mode == ViewMode::DualPage {
-                2
-            } else {
-                1
-            };
-            if self.current_page + increment < metadata.page_count {
-                self.current_page += increment;
-                self.scroll_offset = 0.0;
-                self.load_current_page(cx);
-            }
+        let page_count = self.page_count(cx);
+        if page_count == 0 {
+            return;
+        }
+
+        let increment = if self.view_mode == ViewMode::DualPage {
+            2
+        } else {
+            1
+        };
+
+        if self.current_page + increment < page_count {
+            self.current_page += increment;
+            self.scroll_offset = 0.0;
+            self.load_visible_pages(cx);
         }
     }
 
@@ -322,82 +496,118 @@ impl PdfViewer {
         } else {
             1
         };
+
         if self.current_page >= decrement {
             self.current_page -= decrement;
             self.scroll_offset = 0.0;
-            self.load_current_page(cx);
+            self.load_visible_pages(cx);
         } else if self.current_page > 0 {
             self.current_page = 0;
             self.scroll_offset = 0.0;
-            self.load_current_page(cx);
+            self.load_visible_pages(cx);
         }
     }
 
     fn scroll_down(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        // log::info!("scroll_down called, scroll_offset: {}", self.scroll_offset);
         self.scroll_offset -= SCROLL_AMOUNT;
+        self.clamp_scroll(cx);
+        // Notify for immediate visual update
         cx.notify();
+        // Only check for new pages after scrolling significantly
+        if self.scroll_offset < -500.0 {
+            self.load_visible_pages(cx);
+        }
     }
 
     fn scroll_up(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
+        // log::info!("scroll_up called, scroll_offset: {}", self.scroll_offset);
         self.scroll_offset += SCROLL_AMOUNT;
         if self.scroll_offset > 0.0 {
             self.scroll_offset = 0.0;
         }
+        self.clamp_scroll(cx);
+        // Notify for immediate visual update
         cx.notify();
+        // Don't trigger load_pages on scroll_up since we're going backwards
+    }
+
+    fn clamp_scroll(&mut self, cx: &Context<Self>) {
+        if self.view_mode == ViewMode::ContinuousScroll {
+            let total_height = self.calculate_total_height(cx);
+            let min_scroll = -(total_height - self.view_height).max(0.0);
+            self.scroll_offset = self.scroll_offset.clamp(min_scroll, 0.0);
+        }
+    }
+
+    fn calculate_total_height(&self, cx: &Context<Self>) -> f32 {
+        let page_count = self.page_count(cx);
+        let mut total = 0.0;
+        for page in 0..page_count {
+            total += self.get_page_height(page) + PAGE_GAP;
+        }
+        total - PAGE_GAP
     }
 
     fn page_down(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.scroll_offset -= PAGE_SCROLL_AMOUNT;
-        cx.notify();
-
-        if let Some(content) = &self.page_content {
-            let image_height = content.image.size(0).height.0 as f32;
-            if -self.scroll_offset > image_height {
-                self.next_page(window, cx);
-            }
+        if self.view_mode == ViewMode::ContinuousScroll {
+            self.scroll_offset -= PAGE_SCROLL_AMOUNT;
+            self.clamp_scroll(cx);
+            self.load_visible_pages(cx);
+        } else {
+            self.next_page(window, cx);
         }
     }
 
     fn page_up(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        self.scroll_offset += PAGE_SCROLL_AMOUNT;
-        if self.scroll_offset > 0.0 {
-            if self.current_page > 0 {
-                self.previous_page(window, cx);
-                if let Some(content) = &self.page_content {
-                    let image_height = content.image.size(0).height.0 as f32;
-                    self.scroll_offset = -(image_height - self.view_height).max(0.0);
-                }
-            } else {
+        if self.view_mode == ViewMode::ContinuousScroll {
+            self.scroll_offset += PAGE_SCROLL_AMOUNT;
+            if self.scroll_offset > 0.0 {
                 self.scroll_offset = 0.0;
             }
+            self.load_visible_pages(cx);
+        } else {
+            self.previous_page(window, cx);
         }
-        cx.notify();
     }
 
     fn go_to_first_page(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if self.current_page != 0 {
+        if self.current_page != 0 || self.scroll_offset != 0.0 {
             self.current_page = 0;
             self.scroll_offset = 0.0;
-            self.load_current_page(cx);
+            self.load_visible_pages(cx);
         }
     }
 
     fn go_to_last_page(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(metadata) = self.pdf_item.read(cx).metadata.as_ref() {
-            let last_page = metadata.page_count.saturating_sub(1);
+        let page_count = self.page_count(cx);
+        if page_count == 0 {
+            return;
+        }
+
+        if self.view_mode == ViewMode::ContinuousScroll {
+            // In continuous mode, scroll to the end of the document
+            let total_height = self.calculate_total_height(cx);
+            self.scroll_offset = -(total_height - self.view_height).max(0.0);
+            self.load_visible_pages(cx);
+        } else {
+            // In single/dual page mode, jump to the last page
+            let last_page = page_count.saturating_sub(1);
             if self.current_page != last_page {
                 self.current_page = last_page;
                 self.scroll_offset = 0.0;
-                self.load_current_page(cx);
+                self.load_visible_pages(cx);
             }
         }
+        cx.notify();
     }
 
     fn set_view_mode(&mut self, mode: ViewMode, cx: &mut Context<Self>) {
         if self.view_mode != mode {
             self.view_mode = mode;
             self.scroll_offset = 0.0;
-            self.load_current_page(cx);
+            self.loading_pages.clear();
+            self.load_visible_pages(cx);
         }
     }
 
@@ -488,7 +698,21 @@ impl PdfViewer {
     }
 
     fn render_loading_indicator(&self, cx: &mut Context<Self>) -> impl IntoElement {
-        let progress = self.loading_progress;
+        let loading_count = self.loading_pages.len();
+        let visible_count = self.visible_pages.len();
+        let cached_count = self
+            .visible_pages
+            .iter()
+            .filter(|p| self.page_cache.contains_key(p))
+            .count();
+
+        let progress = if visible_count > 0 {
+            cached_count as f32 / visible_count as f32
+        } else {
+            0.0
+        };
+
+        let seems_stuck = loading_count == 0 && cached_count < visible_count;
 
         div()
             .flex()
@@ -515,8 +739,23 @@ impl PdfViewer {
                 div()
                     .text_sm()
                     .text_color(cx.theme().colors().text_muted)
-                    .child("Loading PDF..."),
+                    .child(if seems_stuck {
+                        format!("Loading stalled ({}/{} pages)", cached_count, visible_count)
+                    } else if loading_count > 0 {
+                        format!("Loading pages... ({} in progress)", loading_count)
+                    } else {
+                        "Preparing...".to_string()
+                    }),
             )
+            .when(seems_stuck, |this| {
+                this.child(
+                    Button::new("retry-all", "Retry Loading").on_click(cx.listener(
+                        |this, _, _, cx| {
+                            this.clear_cache_and_reload(cx);
+                        },
+                    )),
+                )
+            })
     }
 
     fn render_settings_menu(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -600,59 +839,68 @@ impl PdfViewer {
             )
     }
 
-    fn render_page_content(&self, content: PdfPageContent, _cx: &mut Context<Self>) -> AnyElement {
-        let has_selection = self.text_selection.start_position.is_some()
-            && self.text_selection.end_position.is_some()
-            && !self.text_selection.is_selecting;
-
-        let selection_overlay = if has_selection {
-            if let (Some(start), Some(end)) = (
-                self.text_selection.start_position,
-                self.text_selection.end_position,
-            ) {
-                let min_x = start.x.min(end.x);
-                let min_y = start.y.min(end.y);
-                let width = (start.x - end.x).abs();
-                let height = (start.y - end.y).abs();
-
-                Some(
-                    div()
-                        .absolute()
-                        .left(min_x)
-                        .top(min_y)
-                        .w(width)
-                        .h(height)
-                        .bg(gpui::rgba(0x3b82f640))
-                        .border_1()
-                        .border_color(gpui::rgba(0x3b82f6ff)),
+    fn render_page(&self, page_number: usize, cx: &mut Context<Self>) -> AnyElement {
+        if let Some(content) = self.page_cache.get(&page_number) {
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .child(
+                    img(content.image.clone())
+                        .object_fit(ObjectFit::Contain)
+                        .max_w_full(),
                 )
-            } else {
-                None
-            }
+                .into_any_element()
         } else {
-            None
-        };
+            let is_loading = self.loading_pages.contains_key(&page_number);
+            let bg_color = cx.theme().colors().surface_background;
+            let text_color = cx.theme().colors().text_muted;
+            let border_color = cx.theme().colors().border;
 
+            div()
+                .id(("page-placeholder", page_number))
+                .w(px(600.0 * self.zoom_level))
+                .h(px(ESTIMATED_PAGE_HEIGHT * self.zoom_level))
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_2()
+                .bg(bg_color)
+                .border_1()
+                .border_color(border_color)
+                .rounded_md()
+                .child(div().text_sm().text_color(text_color).child(if is_loading {
+                    format!("Loading page {}...", page_number + 1)
+                } else {
+                    format!("Page {} not loaded", page_number + 1)
+                }))
+                .when(!is_loading, |this| {
+                    this.child(
+                        Button::new(("retry", page_number), "Retry").on_click(cx.listener(
+                            move |this, _, _, cx| {
+                                this.load_page(page_number, cx);
+                            },
+                        )),
+                    )
+                })
+                .into_any_element()
+        }
+    }
+
+    fn render_single_page_content(&self, cx: &mut Context<Self>) -> AnyElement {
         div()
-            .relative()
-            .child(
-                img(content.image)
-                    .object_fit(ObjectFit::Contain)
-                    .max_w_full(),
-            )
-            .children(selection_overlay)
+            .flex()
+            .flex_col()
+            .items_center()
+            .gap_2()
+            .mt(px(self.scroll_offset))
+            .child(self.render_page(self.current_page, cx))
             .into_any_element()
     }
 
     fn render_dual_page_content(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut children: Vec<AnyElement> = Vec::new();
-
-        if let Some(primary) = self.page_content.clone() {
-            children.push(self.render_page_content(primary, cx));
-        }
-        if let Some(secondary) = self.secondary_page_content.clone() {
-            children.push(self.render_page_content(secondary, cx));
-        }
+        let page_count = self.page_count(cx);
 
         div()
             .flex()
@@ -661,24 +909,59 @@ impl PdfViewer {
             .justify_center()
             .gap_4()
             .mt(px(self.scroll_offset))
-            .children(children)
+            .child(self.render_page(self.current_page, cx))
+            .when(self.current_page + 1 < page_count, |this| {
+                this.child(self.render_page(self.current_page + 1, cx))
+            })
             .into_any_element()
     }
 
-    fn render_single_page_content(&self, cx: &mut Context<Self>) -> AnyElement {
-        let mut children: Vec<AnyElement> = Vec::new();
+    fn render_continuous_content(&self, cx: &mut Context<Self>) -> AnyElement {
+        let page_count = self.page_count(cx);
+        let scroll = -self.scroll_offset;
+        let view_top = scroll;
+        let view_bottom = scroll + self.view_height + 400.0;
 
-        if let Some(content) = self.page_content.clone() {
-            children.push(self.render_page_content(content, cx));
+        let mut elements: Vec<AnyElement> = Vec::new();
+        let mut y_offset = 0.0;
+
+        for page in 0..page_count {
+            let page_height = self.get_page_height(page);
+            let page_top = y_offset;
+            let page_bottom = y_offset + page_height;
+
+            if page_bottom >= view_top - 200.0 && page_top <= view_bottom {
+                elements.push(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .items_center()
+                        .w_full()
+                        .pb(px(PAGE_GAP))
+                        .child(self.render_page(page, cx))
+                        .into_any_element(),
+                );
+            } else if page_top > view_bottom {
+                break;
+            } else {
+                elements.push(
+                    div()
+                        .h(px(page_height + PAGE_GAP))
+                        .w_full()
+                        .into_any_element(),
+                );
+            }
+
+            y_offset += page_height + PAGE_GAP;
         }
 
         div()
             .flex()
             .flex_col()
             .items_center()
-            .gap_2()
+            .w_full()
             .mt(px(self.scroll_offset))
-            .children(children)
+            .children(elements)
             .into_any_element()
     }
 }
@@ -801,18 +1084,17 @@ impl Item for PdfViewer {
             project: self.project.clone(),
             focus_handle: cx.focus_handle(),
             current_page: self.current_page,
-            page_content: self.page_content.clone(),
-            secondary_page_content: self.secondary_page_content.clone(),
-            load_task: None,
             zoom_level: self.zoom_level,
             page_cache: self.page_cache.clone(),
             scroll_offset: self.scroll_offset,
             view_height: self.view_height,
             view_mode: self.view_mode,
             is_loading: false,
-            loading_progress: 1.0,
+            loading_pages: HashMap::new(),
             show_settings_menu: false,
             text_selection: TextSelection::default(),
+            visible_pages: self.visible_pages.clone(),
+            render_generation: self.render_generation,
         })))
     }
 
@@ -919,57 +1201,54 @@ impl Focusable for PdfViewer {
 
 impl Render for PdfViewer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let metadata = self.pdf_item.read(cx).metadata.as_ref();
-        let page_count = metadata.map(|m| m.page_count).unwrap_or(0);
+        let page_count = self.page_count(cx);
         let file_name = self.pdf_item.read(cx).file.file_name(cx).to_string();
 
-        let has_content = self.page_content.is_some();
+        let has_cached_content = !self.page_cache.is_empty();
         let is_loading = self.is_loading;
         let show_settings = self.show_settings_menu;
 
-        let mut page_info_str = String::new();
-        if let Some(ref content) = self.page_content {
-            let display_page = if self.view_mode == ViewMode::DualPage {
+        let page_info_str = match self.view_mode {
+            ViewMode::DualPage => {
+                let end_page = (self.current_page + 2).min(page_count);
                 format!(
-                    "{}-{}",
-                    content.page_number + 1,
-                    (content.page_number + 2).min(page_count)
+                    "Page {}-{} of {} | Zoom: {:.0}% | {}",
+                    self.current_page + 1,
+                    end_page,
+                    page_count,
+                    self.zoom_level * 100.0,
+                    self.view_mode.label()
                 )
-            } else {
-                format!("{}", content.page_number + 1)
-            };
-            page_info_str = format!(
-                "Page {} of {} | Zoom: {:.0}% | {}",
-                display_page,
-                page_count,
-                self.zoom_level * 100.0,
-                self.view_mode.label()
-            );
-        }
-
-        let content_area = if is_loading && !has_content {
-            self.render_loading_indicator(cx).into_any_element()
-        } else if has_content {
-            match self.view_mode {
-                ViewMode::DualPage => self.render_dual_page_content(cx).into_any_element(),
-                _ => self.render_single_page_content(cx).into_any_element(),
             }
-        } else {
-            div()
-                .flex()
-                .flex_col()
-                .items_center()
-                .justify_center()
-                .h_full()
-                .gap_2()
-                .child(div().text_lg().child("Failed to load PDF"))
-                .child(
-                    div()
-                        .text_sm()
-                        .text_color(cx.theme().colors().text_muted)
-                        .child(file_name.clone()),
+            ViewMode::ContinuousScroll => {
+                let first_visible = self.visible_pages.first().copied().unwrap_or(0);
+                format!(
+                    "Page {} of {} | Zoom: {:.0}% | {}",
+                    first_visible + 1,
+                    page_count,
+                    self.zoom_level * 100.0,
+                    self.view_mode.label()
                 )
-                .into_any_element()
+            }
+            ViewMode::SinglePage => {
+                format!(
+                    "Page {} of {} | Zoom: {:.0}% | {}",
+                    self.current_page + 1,
+                    page_count,
+                    self.zoom_level * 100.0,
+                    self.view_mode.label()
+                )
+            }
+        };
+
+        let content_area = if is_loading && !has_cached_content {
+            self.render_loading_indicator(cx).into_any_element()
+        } else {
+            match self.view_mode {
+                ViewMode::SinglePage => self.render_single_page_content(cx),
+                ViewMode::DualPage => self.render_dual_page_content(cx),
+                ViewMode::ContinuousScroll => self.render_continuous_content(cx),
+            }
         };
 
         div()
@@ -980,9 +1259,11 @@ impl Render for PdfViewer {
             .flex_col()
             .bg(cx.theme().colors().background)
             .on_action(cx.listener(|this, _: &ScrollDown, window, cx| {
+                // log::info!("ScrollDown action received");
                 this.scroll_down(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ScrollUp, window, cx| {
+                log::info!("ScrollUp action received");
                 this.scroll_up(window, cx);
             }))
             .on_action(cx.listener(|this, _: &PageDown, window, cx| {
@@ -1026,22 +1307,38 @@ impl Render for PdfViewer {
                         let zoom_delta = dy * 0.003;
                         let new_zoom = (this.zoom_level - zoom_delta).clamp(MIN_ZOOM, MAX_ZOOM);
 
-                        if (new_zoom - this.zoom_level).abs() > 0.01 {
+                        if (new_zoom - this.zoom_level).abs() > 0.05 {
+                            log::info!(
+                                "Scroll-zoom triggered: {} -> {} (delta {})",
+                                this.zoom_level,
+                                new_zoom,
+                                zoom_delta
+                            );
                             this.zoom_level = new_zoom;
-                            this.page_cache.retain(|_, cached| {
-                                (cached.scale_factor - this.zoom_level).abs() < 0.01
-                            });
-                            this.load_current_page(cx);
+                            this.clear_cache_and_reload(cx);
                         }
                     } else {
+                        let old_offset = this.scroll_offset;
                         this.scroll_offset += dy;
+                        if this.scroll_offset > 0.0 {
+                            this.scroll_offset = 0.0;
+                        }
+                        this.clamp_scroll(cx);
+
+                        // Always notify for smooth scrolling
                         cx.notify();
+
+                        // Only check for new pages if we scrolled significantly
+                        if (this.scroll_offset - old_offset).abs() > 50.0 {
+                            this.load_visible_pages(cx);
+                        }
                     }
                 }),
             )
             .on_mouse_down(
                 MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.focus_handle.focus(window, cx);
                     this.start_text_selection(event.position, cx);
                 }),
             )
@@ -1133,7 +1430,7 @@ impl Render for PdfViewer {
                     .overflow_hidden()
                     .relative()
                     .child(content_area)
-                    .when(is_loading && has_content, |this| {
+                    .when(is_loading && has_cached_content, |this| {
                         this.child(
                             div()
                                 .absolute()
@@ -1147,7 +1444,7 @@ impl Render for PdfViewer {
                                 .border_color(cx.theme().colors().border)
                                 .text_xs()
                                 .text_color(cx.theme().colors().text_muted)
-                                .child("Rendering..."),
+                                .child(format!("Loading {} pages...", self.loading_pages.len())),
                         )
                     })
                     .when(show_settings, |this| {
