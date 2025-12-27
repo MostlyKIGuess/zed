@@ -228,32 +228,57 @@ thread_local! {
     static PDFIUM_BINDINGS: std::cell::RefCell<Option<pdfium_render::prelude::Pdfium>> = const { std::cell::RefCell::new(None) };
 }
 
+/// Initialize Pdfium on the calling thread.
+/// this should be called from the main thread before any background rendering
+/// to ensure the Pdfium instance is ready and cached.
+pub fn initialize_pdfium() -> anyhow::Result<()> {
+    with_pdfium(|_| Ok(()))
+}
+
 fn with_pdfium<T, F>(f: F) -> anyhow::Result<T>
 where
     F: FnOnce(&pdfium_render::prelude::Pdfium) -> anyhow::Result<T>,
 {
     use pdfium_render::prelude::*;
 
-    PDFIUM_BINDINGS.with(|cell| {
-        let mut borrow = cell.borrow_mut();
-        if borrow.is_none() {
-            let bindings = Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(
+    PDFIUM_BINDINGS
+        .try_with(|cell| {
+            // if cell.borrow().is_some() {
+            //     log::info!("[PDF] with_pdfium: Using cached instance");
+            // } else {
+            //     log::info!("[PDF] with_pdfium: Initializing new instance");
+            // }
+
+            let mut borrow = cell.borrow_mut();
+            if borrow.is_none() {
+                // log::info!("[PDF] with_pdfium: Binding to library...");
+                let bindings = Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path(
                 "crates/pdf_viewer/lib/",
             ))
             .or_else(|_| {
+                // log::info!("[PDF] with_pdfium: Trying ./ path");
                 Pdfium::bind_to_library(Pdfium::pdfium_platform_library_name_at_path("./"))
             })
-            .or_else(|_| Pdfium::bind_to_system_library())
+            .or_else(|_| {
+                // log::info!("[PDF] with_pdfium: Trying system library");
+                Pdfium::bind_to_system_library()
+            })
             .map_err(|e| {
+                // log::error!("[PDF] with_pdfium: Failed to bind - {}", e);
                 anyhow::anyhow!(
                     "Failed to bind to pdfium library: {}. Ensure pdfium binaries are available.",
                     e
                 )
             })?;
-            *borrow = Some(Pdfium::new(bindings));
-        }
-        f(borrow.as_ref().expect("pdfium was just initialized"))
-    })
+
+                // log::info!("[PDF] with_pdfium: Creating Pdfium instance...");
+                *borrow = Some(Pdfium::new(bindings));
+                // log::info!("[PDF] with_pdfium: Initialization complete");
+            }
+            let pdfium = borrow.as_ref().expect("pdfium was just initialized");
+            f(pdfium)
+        })
+        .map_err(|e| anyhow::anyhow!("Failed to access thread-local Pdfium: {}", e))?
 }
 
 pub fn render_pdf_page_to_raw(
@@ -300,6 +325,113 @@ pub fn render_pdf_page_to_raw(
             height,
         })
     })
+}
+
+/// Batch render multiple pages from a single document load.
+/// This is more efficient than calling render_pdf_page_to_raw multiple times
+/// because the PDF document is loaded only once.
+pub fn render_pdf_pages_batch(
+    bytes: &[u8],
+    page_numbers: &[usize],
+    scale_factor: f32,
+) -> anyhow::Result<std::collections::HashMap<usize, RenderedPage>> {
+    use pdfium_render::prelude::*;
+    use std::collections::HashMap;
+
+    // log::info!(
+    //     "[PDF] render_pdf_pages_batch: START - pages={:?}, scale={}",
+    //     page_numbers,
+    //     scale_factor
+    // );
+
+    let result = with_pdfium(|pdfium| {
+        let document = pdfium.load_pdf_from_byte_slice(bytes, None)?;
+
+        let pages = document.pages();
+
+        let mut results = HashMap::new();
+
+        for &page_number in page_numbers {
+            let page = pages.get(page_number as u16)?;
+
+            let page_width = page.width().value;
+            let page_height = page.height().value;
+            // log::info!(
+            //     "[PDF] render_pdf_pages_batch: Page {} size: {}x{}",
+            //     page_number,
+            //     page_width,
+            //     page_height
+            // );
+
+            let target_width = (page_width * scale_factor) as i32;
+            let target_height = (page_height * scale_factor) as i32;
+            // log::info!(
+            //     "[PDF] render_pdf_pages_batch: Page {} target: {}x{}",
+            //     page_number,
+            //     target_width,
+            //     target_height
+            // );
+
+            let render_config = PdfRenderConfig::new()
+                .set_target_width(target_width)
+                .set_target_height(target_height)
+                .set_reverse_byte_order(true);
+
+            let bitmap = page.render_with_config(&render_config)?;
+
+            let dynamic_image = bitmap.as_image();
+
+            let rgba_image = dynamic_image.to_rgba8();
+
+            let width = rgba_image.width();
+            let height = rgba_image.height();
+            // log::info!(
+            //     "[PDF] render_pdf_pages_batch: Page {} RGBA dimensions: {}x{}",
+            //     page_number,
+            //     width,
+            //     height
+            // );
+
+            let mut buffer = RgbaImage::from_raw(width, height, rgba_image.into_raw())
+                .ok_or_else(|| anyhow::anyhow!("Failed to create RGBA image buffer"))?;
+            // log::info!(
+            //     "[PDF] render_pdf_pages_batch: Created buffer for page {}",
+            //     page_number
+            // );
+
+            for pixel in buffer.chunks_exact_mut(4) {
+                pixel.swap(0, 2);
+            }
+
+            let frame = Frame::new(buffer);
+
+            results.insert(
+                page_number,
+                RenderedPage {
+                    data: SmallVec::from_elem(frame, 1),
+                    width,
+                    height,
+                },
+            );
+            // log::info!(
+            //     "[PDF] render_pdf_pages_batch: Finished page {}",
+            //     page_number
+            // );
+        }
+
+        // log::info!(
+        //     "[PDF] render_pdf_pages_batch: Successfully rendered {} pages",
+        //     results.len()
+        // );
+        Ok(results)
+    });
+
+    // match &result {
+    //     Ok(_) => log::info!("[PDF] render_pdf_pages_batch: COMPLETED OK"),
+    //     Err(e) => log::error!("[PDF] render_pdf_pages_batch: FAILED - {}", e),
+    // }
+
+    result
 }
 
 pub fn render_pdf_page_to_image(

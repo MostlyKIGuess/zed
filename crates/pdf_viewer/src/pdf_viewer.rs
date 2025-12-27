@@ -14,7 +14,10 @@ use gpui::{
 };
 
 use language::File as _;
-use project::{PdfItem, Project, ProjectPath, pdf_store::render_pdf_page_to_raw};
+use project::{
+    PdfItem, Project, ProjectPath,
+    pdf_store::{render_pdf_page_to_raw, render_pdf_pages_batch},
+};
 use settings::Settings;
 
 use theme::{Theme, ThemeSettings};
@@ -100,6 +103,7 @@ pub struct PdfViewer {
     text_selection: TextSelection,
     visible_pages: Vec<usize>,
     render_generation: u64,
+    last_reload_time: std::time::Instant,
 }
 
 const SCROLL_AMOUNT: f32 = 80.0;
@@ -134,6 +138,7 @@ impl PdfViewer {
             text_selection: TextSelection::default(),
             visible_pages: vec![0],
             render_generation: 0,
+            last_reload_time: std::time::Instant::now(),
         };
 
         // log::info!(
@@ -222,7 +227,7 @@ impl PdfViewer {
         self.visible_pages = new_visible.clone();
 
         // log::info!(
-        //     "load_visible_pages: visible={:?}, cached={}, loading={}, generation={}",
+        //     "[PDF] load_visible_pages: visible={:?}, cached={}, loading={}, generation={}",
         //     self.visible_pages,
         //     self.page_cache.len(),
         //     self.loading_pages.len(),
@@ -239,17 +244,18 @@ impl PdfViewer {
             .collect();
 
         // if !pages_to_load.is_empty() {
-        //     // log::info!("Pages to load: {:?}", pages_to_load);
+        //     log::info!("[PDF] Pages to load: {:?}", pages_to_load);
         // }
 
         // notify iff something changed
         let something_changed = !pages_to_load.is_empty() || new_visible != old_visible;
 
-        for page in pages_to_load {
-            self.load_page(page, cx);
+        if !pages_to_load.is_empty() {
+            self.load_pages_batch(pages_to_load, cx);
         }
 
-        self.preload_adjacent_pages(cx);
+        // TODO: Re-enable preloading once concurrent rendering is fixed
+        // self.preload_adjacent_pages(cx);
         self.update_loading_state();
 
         if something_changed {
@@ -289,7 +295,7 @@ impl PdfViewer {
                 Ok(Some(bytes)) => bytes,
                 Ok(None) => {
                     // log::warn!("No PDF metadata available for page {}", page_number);
-                    if let Err(e) = this.update(cx, |this, cx| {
+                    if let Err(_e) = this.update(cx, |this, cx| {
                         if this.loading_pages.get(&page_number) == Some(&generation) {
                             this.loading_pages.remove(&page_number);
                         }
@@ -300,9 +306,9 @@ impl PdfViewer {
                     }
                     return;
                 }
-                Err(e) => {
+                Err(_e) => {
                     // log::error!("Failed to get PDF bytes for page {}: {e:?}", page_number);
-                    if let Err(e) = this.update(cx, |this, cx| {
+                    if let Err(_e) = this.update(cx, |this, cx| {
                         if this.loading_pages.get(&page_number) == Some(&generation) {
                             this.loading_pages.remove(&page_number);
                         }
@@ -322,7 +328,7 @@ impl PdfViewer {
                 })
                 .await;
 
-            if let Err(e) = this.update(cx, |this, cx| {
+            if let Err(_e) = this.update(cx, |this, cx| {
                 let current_generation = this.render_generation;
 
                 if generation != current_generation {
@@ -361,7 +367,7 @@ impl PdfViewer {
                         };
                         this.page_cache.insert(page_number, content);
                     }
-                    Err(e) => {
+                    Err(_e) => {
                         // log::error!("Failed to render PDF page {}: {e:?}", page_number);
                     }
                 }
@@ -374,6 +380,142 @@ impl PdfViewer {
                 //     page_number
                 // );
             }
+        })
+        .detach();
+    }
+
+    fn load_pages_batch(&mut self, page_numbers: Vec<usize>, cx: &mut Context<Self>) {
+        if page_numbers.is_empty() {
+            return;
+        }
+
+        let page_count = self.page_count(cx);
+        let generation = self.render_generation;
+
+        // filter out invalid pages and pages already loading
+        let pages_to_actually_load: Vec<usize> = page_numbers
+            .into_iter()
+            .filter(|&page| page < page_count && !self.loading_pages.contains_key(&page))
+            .collect();
+
+        if pages_to_actually_load.is_empty() {
+            // log::debug!("[PDF] All pages already loading, skipping spawn");
+            return;
+        }
+
+        // log::info!(
+        //     "[PDF] Starting batch render for pages {:?}, generation={}, zoom={}",
+        //     pages_to_actually_load,
+        //     generation,
+        //     self.zoom_level
+        // );
+
+        // Mark these pages as loading
+        for &page in &pages_to_actually_load {
+            self.loading_pages.insert(page, generation);
+        }
+        self.is_loading = true;
+
+        let pdf_item = self.pdf_item.clone();
+        let scale_factor = self.zoom_level;
+
+        cx.spawn(async move |this, cx| {
+            // log::info!("[PDF] Batch render task started for pages {:?}", pages_to_actually_load);
+
+            let bytes_result = cx.update(|cx| {
+                let item = pdf_item.read(cx);
+                item.metadata.as_ref().map(|m| m.bytes.clone())
+            });
+
+            let bytes = match bytes_result {
+                Ok(Some(bytes)) => bytes,
+                Ok(None) => {
+                    // log::warn!("[PDF] No metadata available for pages {:?}", pages_to_actually_load);
+                    // No metadata - clean up
+                    let _ = this.update(cx, |this, cx| {
+                        for page in &pages_to_actually_load {
+                            if this.loading_pages.get(page) == Some(&generation) {
+                                this.loading_pages.remove(page);
+                            }
+                        }
+                        this.update_loading_state();
+                        cx.notify();
+                    });
+                    return;
+                }
+                Err(_e) => {
+                    // log::error!("[PDF] Failed to get PDF bytes for pages {:?}", pages_to_actually_load);
+                    // Error getting bytes - clean up
+                    let _ = this.update(cx, |this, cx| {
+                        for page in &pages_to_actually_load {
+                            if this.loading_pages.get(page) == Some(&generation) {
+                                this.loading_pages.remove(page);
+                            }
+                        }
+                        this.update_loading_state();
+                        cx.notify();
+                    });
+                    return;
+                }
+            };
+
+            // log::info!("[PDF] Starting render for pages {:?}", pages_to_actually_load);
+
+            // render directly in foreground task to avoid Pdfium threading issues
+            let render_result = {
+                // log::info!("[PDF] Calling render_pdf_pages_batch for pages {:?}", pages_to_actually_load);
+                let result = render_pdf_pages_batch(&bytes, &pages_to_actually_load, scale_factor);
+                // log::info!("[PDF] render_pdf_pages_batch completed for pages {:?}, success={}", pages_to_actually_load, result.is_ok());
+                result
+            };
+
+            let _ = this.update(cx, |this, cx| {
+                let current_generation = this.render_generation;
+
+                // Clean up loading state even if we discard results
+                for page in &pages_to_actually_load {
+                    this.loading_pages.remove(page);
+                }
+
+                if generation != current_generation {
+                    // log::warn!("[PDF] Discarding stale renders for pages {:?} (generation {} vs current {})", pages_to_actually_load, generation, current_generation);
+                    // Stale render - discard results
+                    this.update_loading_state();
+                    cx.notify();
+                    return;
+                }
+
+                match render_result {
+                    Ok(rendered_pages) => {
+                        // log::info!("[PDF] Successfully rendered {} pages", rendered_pages.len());
+                        for (page_number, rendered_page) in rendered_pages {
+                            // Check again if render was cancelled
+                            if this.render_generation != generation {
+                                continue;
+                            }
+
+                            let height = rendered_page.height as f32;
+                            let render_image = Arc::new(RenderImage::new(rendered_page.data));
+                            let content = PdfPageContent {
+                                image: render_image,
+                                page_number,
+                                scale_factor,
+                                height,
+                            };
+                            this.page_cache.insert(page_number, content);
+                            // log::debug!("[PDF] Cached page {}", page_number);
+                        }
+                    }
+                    Err(_e) => {
+                        // log::error!("[PDF] Failed to batch render PDF pages: {:?}", pages_to_actually_load);
+                        // Render failed - pages already cleaned up above
+                    }
+                }
+
+                this.update_loading_state();
+                // log::info!("[PDF] Batch render done, loading_pages={}, cached={}", this.loading_pages.len(), this.page_cache.len());
+                cx.notify();
+            });
         })
         .detach();
     }
@@ -445,23 +587,43 @@ impl PdfViewer {
     }
 
     fn clear_cache_and_reload(&mut self, cx: &mut Context<Self>) {
+        // Rate-limit: don't clear cache more than once per 200ms
+        let now = std::time::Instant::now();
+        if now.duration_since(self.last_reload_time) < std::time::Duration::from_millis(200) {
+            // log::debug!("[PDF] Skipping cache clear, rate limited");
+            return;
+        }
+
+        // Don't clear if there are pages still loading
+        if !self.loading_pages.is_empty() {
+            // log::info!(
+            //     "[PDF] Skipping cache clear, {} pages still loading",
+            //     self.loading_pages.len()
+            // );
+            return;
+        }
+
+        self.last_reload_time = now;
         self.render_generation = self.render_generation.wrapping_add(1);
-        // log::info!("Clearing cache, new generation: {}", self.render_generation);
+        // log::info!(
+        //     "[PDF] Clearing cache, new generation: {}, cached={}, loading={}",
+        //     self.render_generation,
+        //     self.page_cache.len(),
+        //     self.loading_pages.len()
+        // );
         self.page_cache.clear();
         self.loading_pages.clear();
         self.visible_pages.clear();
-        self.is_loading = true;
+        self.is_loading = false; // this will be set to true by load_visible_pages
         self.load_visible_pages(cx);
     }
 
     fn zoom_in(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        // log::info!("zoom_in called, current zoom: {}", self.zoom_level);
         self.zoom_level = (self.zoom_level * 1.2).min(MAX_ZOOM);
         self.clear_cache_and_reload(cx);
     }
 
     fn zoom_out(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        // log::info!("zoom_out called, current zoom: {}", self.zoom_level);
         self.zoom_level = (self.zoom_level / 1.2).max(MIN_ZOOM);
         self.clear_cache_and_reload(cx);
     }
@@ -1095,6 +1257,7 @@ impl Item for PdfViewer {
             text_selection: TextSelection::default(),
             visible_pages: self.visible_pages.clone(),
             render_generation: self.render_generation,
+            last_reload_time: std::time::Instant::now(),
         })))
     }
 
@@ -1179,7 +1342,7 @@ impl SerializableItem for PdfViewer {
 
         Some(cx.background_spawn({
             async move {
-                log::debug!("Saving pdf at path {pdf_path:?}");
+                // log::debug!("Saving pdf at path {pdf_path:?}");
                 PDF_VIEWER_DB
                     .save_pdf_path(item_id, workspace_id, pdf_path)
                     .await
@@ -1263,7 +1426,7 @@ impl Render for PdfViewer {
                 this.scroll_down(window, cx);
             }))
             .on_action(cx.listener(|this, _: &ScrollUp, window, cx| {
-                log::info!("ScrollUp action received");
+                // log::info!("ScrollUp action received");
                 this.scroll_up(window, cx);
             }))
             .on_action(cx.listener(|this, _: &PageDown, window, cx| {
@@ -1308,12 +1471,12 @@ impl Render for PdfViewer {
                         let new_zoom = (this.zoom_level - zoom_delta).clamp(MIN_ZOOM, MAX_ZOOM);
 
                         if (new_zoom - this.zoom_level).abs() > 0.05 {
-                            log::info!(
-                                "Scroll-zoom triggered: {} -> {} (delta {})",
-                                this.zoom_level,
-                                new_zoom,
-                                zoom_delta
-                            );
+                            // log::info!(
+                            //     "Scroll-zoom triggered: {} -> {} (delta {})",
+                            //     this.zoom_level,
+                            //     new_zoom,
+                            //     zoom_delta
+                            // );
                             this.zoom_level = new_zoom;
                             this.clear_cache_and_reload(cx);
                         }
