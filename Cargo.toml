@@ -126,6 +126,7 @@ members = [
     "crates/outline_panel",
     "crates/panel",
     "crates/paths",
+    "crates/pdf_viewer",
     "crates/picker",
     "crates/prettier",
     "crates/project",
@@ -358,6 +359,7 @@ outline = { path = "crates/outline" }
 outline_panel = { path = "crates/outline_panel" }
 panel = { path = "crates/panel" }
 paths = { path = "crates/paths" }
+pdf_viewer = { path = "crates/pdf_viewer" }
 perf = { path = "tooling/perf" }
 picker = { path = "crates/picker" }
 prettier = { path = "crates/prettier" }
@@ -827,6 +829,7 @@ notifications = { codegen-units = 1 }
 ollama = { codegen-units = 1 }
 outline = { codegen-units = 1 }
 paths = { codegen-units = 1 }
+pdf_viewer = { codegen-units = 1 }
 prettier = { codegen-units = 1 }
 project_symbols = { codegen-units = 1 }
 refineable = { codegen-units = 1 }
