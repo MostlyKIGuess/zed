@@ -265,6 +265,10 @@ impl ReplStore {
                     remote_spec.kernelspec.language.to_lowercase()
                         == language_at_cursor.code_fence_block_name().to_lowercase()
                 }
+                KernelSpecification::SshRemote(spec) => {
+                    spec.kernelspec.language.to_lowercase()
+                        == language_at_cursor.code_fence_block_name().to_lowercase()
+                }
             })
             .cloned()
     }

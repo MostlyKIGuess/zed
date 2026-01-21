@@ -1,9 +1,10 @@
 use crate::components::KernelListItem;
-use crate::kernels::RemoteRunningKernel;
 use crate::setup_editor_session_actions;
 use crate::{
     KernelStatus,
-    kernels::{Kernel, KernelSpecification, NativeRunningKernel},
+    kernels::{
+        Kernel, KernelSpecification, NativeRunningKernel, RemoteRunningKernel, SshRunningKernel,
+    },
     outputs::{
         ExecutionStatus, ExecutionView, ExecutionViewFinishedEmpty, ExecutionViewFinishedSmall,
     },
@@ -277,11 +278,29 @@ impl Session {
                 window,
                 cx,
             ),
+            KernelSpecification::SshRemote(spec) => {
+                let project = self
+                    .editor
+                    .upgrade()
+                    .and_then(|editor| editor.read(cx).project().cloned());
+                if let Some(project) = project {
+                    SshRunningKernel::new(
+                        spec,
+                        working_directory,
+                        gpui::Entity::from(project),
+                        session_view,
+                        window,
+                        cx,
+                    )
+                } else {
+                    Task::ready(Err(anyhow::anyhow!("No project associated with editor")))
+                }
+            }
         };
 
         let pending_kernel = cx
             .spawn(async move |this, cx| {
-                let kernel = kernel.await;
+                let kernel: anyhow::Result<Box<dyn crate::kernels::RunningKernel>> = kernel.await;
 
                 match kernel {
                     Ok(kernel) => {

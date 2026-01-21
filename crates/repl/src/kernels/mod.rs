@@ -14,6 +14,9 @@ mod remote_kernels;
 use project::{Project, ProjectPath, Toolchains, WorktreeId};
 pub use remote_kernels::*;
 
+mod ssh_kernel;
+pub use ssh_kernel::*;
+
 use anyhow::Result;
 use jupyter_protocol::JupyterKernelspec;
 use runtimelib::{ExecutionState, JupyterMessage, KernelInfoReply};
@@ -27,7 +30,28 @@ pub enum KernelSpecification {
     Remote(RemoteKernelSpecification),
     Jupyter(LocalKernelSpecification),
     PythonEnv(LocalKernelSpecification),
+    SshRemote(SshRemoteKernelSpecification),
 }
+
+#[derive(Debug, Clone)]
+pub struct SshRemoteKernelSpecification {
+    pub name: String,
+    pub kernelspec: JupyterKernelspec,
+}
+
+impl PartialEq for SshRemoteKernelSpecification {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.kernelspec.argv == other.kernelspec.argv
+            && self.kernelspec.display_name == other.kernelspec.display_name
+            && self.kernelspec.language == other.kernelspec.language
+            && self.kernelspec.interrupt_mode == other.kernelspec.interrupt_mode
+            && self.kernelspec.env == other.kernelspec.env
+            && self.kernelspec.metadata == other.kernelspec.metadata
+    }
+}
+
+impl Eq for SshRemoteKernelSpecification {}
 
 impl KernelSpecification {
     pub fn name(&self) -> SharedString {
@@ -35,6 +59,7 @@ impl KernelSpecification {
             Self::Jupyter(spec) => spec.name.clone().into(),
             Self::PythonEnv(spec) => spec.name.clone().into(),
             Self::Remote(spec) => spec.name.clone().into(),
+            Self::SshRemote(spec) => spec.name.clone().into(),
         }
     }
 
@@ -43,6 +68,7 @@ impl KernelSpecification {
             Self::Jupyter(_) => "Jupyter".into(),
             Self::PythonEnv(_) => "Python Environment".into(),
             Self::Remote(_) => "Remote".into(),
+            Self::SshRemote(_) => "SSH Remote".into(),
         }
     }
 
@@ -51,6 +77,7 @@ impl KernelSpecification {
             Self::Jupyter(spec) => spec.path.to_string_lossy().into_owned(),
             Self::PythonEnv(spec) => spec.path.to_string_lossy().into_owned(),
             Self::Remote(spec) => spec.url.to_string(),
+            Self::SshRemote(_) => "Remote".to_string(),
         })
     }
 
@@ -59,6 +86,7 @@ impl KernelSpecification {
             Self::Jupyter(spec) => spec.kernelspec.language.clone(),
             Self::PythonEnv(spec) => spec.kernelspec.language.clone(),
             Self::Remote(spec) => spec.kernelspec.language.clone(),
+            Self::SshRemote(spec) => spec.kernelspec.language.clone(),
         })
     }
 
@@ -67,6 +95,7 @@ impl KernelSpecification {
             Self::Jupyter(spec) => spec.kernelspec.language.clone(),
             Self::PythonEnv(spec) => spec.kernelspec.language.clone(),
             Self::Remote(spec) => spec.kernelspec.language.clone(),
+            Self::SshRemote(spec) => spec.kernelspec.language.clone(),
         };
 
         file_icons::FileIcons::get(cx)
@@ -82,6 +111,8 @@ pub fn python_env_kernel_specifications(
     cx: &mut App,
 ) -> impl Future<Output = Result<Vec<KernelSpecification>>> + use<> {
     let python_language = LanguageName::new_static("Python");
+    let is_remote = project.read(cx).is_remote();
+
     let toolchains = project.read(cx).available_toolchains(
         ProjectPath {
             worktree_id,
@@ -110,6 +141,31 @@ pub fn python_env_kernel_specifications(
             .chain(toolchains.toolchains)
             .map(|toolchain| {
                 background_executor.spawn(async move {
+                    // For remote projects, we assume python is available assuming toolchain is reported.
+                    // We can skip the `ipykernel` check or run it remotely.
+                    // For MVP, lets trust the toolchain existence or do the check if it's cheap.
+                    // `new_smol_command` runs locally. We need to run remotely if `is_remote`.
+
+                    if is_remote {
+                        let default_kernelspec = JupyterKernelspec {
+                            argv: vec![
+                                "python3".to_string(), // using generic python3 for now on remote
+                            ],
+                            display_name: format!("Remote {}", toolchain.name),
+                            language: "python".to_string(),
+                            interrupt_mode: None,
+                            metadata: None,
+                            env: None,
+                        };
+
+                        return Some(KernelSpecification::SshRemote(
+                            SshRemoteKernelSpecification {
+                                name: format!("Remote {}", toolchain.name),
+                                kernelspec: default_kernelspec,
+                            },
+                        ));
+                    }
+
                     let python_path = toolchain.path.to_string();
 
                     // Check if ipykernel is installed
