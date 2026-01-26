@@ -2,7 +2,10 @@ use crate::components::KernelListItem;
 use crate::setup_editor_session_actions;
 use crate::{
     KernelStatus,
-    kernels::{Kernel, KernelSession, KernelSpecification, NativeRunningKernel},
+    kernels::{
+        Kernel, KernelSession, KernelSpecification, NativeRunningKernel, RemoteRunningKernel,
+        SshRunningKernel, WslRunningKernel,
+    },
     outputs::{
         ExecutionStatus, ExecutionView, ExecutionViewFinishedEmpty, ExecutionViewFinishedSmall,
     },
@@ -294,6 +297,15 @@ impl Session {
                     Task::ready(Err(anyhow::anyhow!("No project associated with editor")))
                 }
             }
+            KernelSpecification::WslRemote(spec) => WslRunningKernel::new(
+                spec,
+                entity_id,
+                working_directory,
+                self.fs.clone(),
+                session_view,
+                window,
+                cx,
+            ),
         };
 
         let pending_kernel = cx

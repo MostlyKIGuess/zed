@@ -1,4 +1,4 @@
-use super::{RunningKernel, SshRemoteKernelSpecification};
+use super::{KernelSession, RunningKernel, SshRemoteKernelSpecification};
 use anyhow::{Context as _, Result};
 use client::proto;
 use futures::stream::SelectAll;
@@ -22,11 +22,11 @@ pub struct SshRunningKernel {
 }
 
 impl SshRunningKernel {
-    pub fn new(
+    pub fn new<S: KernelSession + 'static>(
         kernel_spec: SshRemoteKernelSpecification,
         working_directory: PathBuf,
         project: Entity<Project>,
-        session: Entity<crate::Session>,
+        session: Entity<S>,
         window: &mut Window,
         cx: &mut App,
     ) -> Task<Result<Box<dyn RunningKernel>>> {

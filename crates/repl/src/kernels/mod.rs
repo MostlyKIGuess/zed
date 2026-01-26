@@ -17,6 +17,9 @@ pub use remote_kernels::*;
 mod ssh_kernel;
 pub use ssh_kernel::*;
 
+mod wsl_kernel;
+pub use wsl_kernel::*;
+
 use anyhow::Result;
 use gpui::Context;
 use jupyter_protocol::JupyterKernelspec;
@@ -37,12 +40,20 @@ pub enum KernelSpecification {
     Jupyter(LocalKernelSpecification),
     PythonEnv(LocalKernelSpecification),
     SshRemote(SshRemoteKernelSpecification),
+    WslRemote(WslKernelSpecification),
 }
 
 #[derive(Debug, Clone)]
 pub struct SshRemoteKernelSpecification {
     pub name: String,
     pub kernelspec: JupyterKernelspec,
+}
+
+#[derive(Debug, Clone)]
+pub struct WslKernelSpecification {
+    pub name: String,
+    pub kernelspec: JupyterKernelspec,
+    pub distro: String,
 }
 
 impl PartialEq for SshRemoteKernelSpecification {
@@ -59,6 +70,21 @@ impl PartialEq for SshRemoteKernelSpecification {
 
 impl Eq for SshRemoteKernelSpecification {}
 
+impl PartialEq for WslKernelSpecification {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+            && self.kernelspec.argv == other.kernelspec.argv
+            && self.kernelspec.display_name == other.kernelspec.display_name
+            && self.kernelspec.language == other.kernelspec.language
+            && self.kernelspec.interrupt_mode == other.kernelspec.interrupt_mode
+            && self.kernelspec.env == other.kernelspec.env
+            && self.kernelspec.metadata == other.kernelspec.metadata
+            && self.distro == other.distro
+    }
+}
+
+impl Eq for WslKernelSpecification {}
+
 impl KernelSpecification {
     pub fn name(&self) -> SharedString {
         match self {
@@ -66,6 +92,7 @@ impl KernelSpecification {
             Self::PythonEnv(spec) => spec.name.clone().into(),
             Self::Remote(spec) => spec.name.clone().into(),
             Self::SshRemote(spec) => spec.name.clone().into(),
+            Self::WslRemote(spec) => spec.name.clone().into(),
         }
     }
 
@@ -75,6 +102,7 @@ impl KernelSpecification {
             Self::PythonEnv(_) => "Python Environment".into(),
             Self::Remote(_) => "Remote".into(),
             Self::SshRemote(_) => "SSH Remote".into(),
+            Self::WslRemote(_) => "WSL Remote".into(),
         }
     }
 
@@ -84,6 +112,7 @@ impl KernelSpecification {
             Self::PythonEnv(spec) => spec.path.to_string_lossy().into_owned(),
             Self::Remote(spec) => spec.url.to_string(),
             Self::SshRemote(_) => "Remote".to_string(),
+            Self::WslRemote(_) => "WSL".to_string(),
         })
     }
 
@@ -93,6 +122,7 @@ impl KernelSpecification {
             Self::PythonEnv(spec) => spec.kernelspec.language.clone(),
             Self::Remote(spec) => spec.kernelspec.language.clone(),
             Self::SshRemote(spec) => spec.kernelspec.language.clone(),
+            Self::WslRemote(spec) => spec.kernelspec.language.clone(),
         })
     }
 
@@ -102,6 +132,7 @@ impl KernelSpecification {
             Self::PythonEnv(spec) => spec.kernelspec.language.clone(),
             Self::Remote(spec) => spec.kernelspec.language.clone(),
             Self::SshRemote(spec) => spec.kernelspec.language.clone(),
+            Self::WslRemote(spec) => spec.kernelspec.language.clone(),
         };
 
         file_icons::FileIcons::get(cx)

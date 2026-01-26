@@ -162,6 +162,7 @@ impl PickerDelegate for KernelPickerDelegate {
                 Some(truncate_path(&kernelspec.path(), 42)),
             ),
             KernelSpecification::SshRemote(_) => (kernelspec.name(), "SSH Remote", None),
+            KernelSpecification::WslRemote(_) => (kernelspec.name(), "WSL Remote", None),
         };
 
         Some(
