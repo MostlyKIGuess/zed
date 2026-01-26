@@ -50,12 +50,15 @@ impl SshRunningKernel {
             let project_id =
                 project_id_opt.ok_or_else(|| anyhow::anyhow!("not connected to remote project"))?;
 
+            log::info!("SshRunningKernel: spawning kernel {} on project {}", kernel_spec.name, project_id);
+
             let request = proto::SpawnKernel {
                 kernel_name: kernel_spec.name.clone(),
                 working_directory: working_directory.to_string_lossy().to_string(),
                 project_id,
             };
             let response = client.request::<proto::SpawnKernel>(request).await?;
+            log::info!("SshRunningKernel: spawned kernel, id: {}", response.kernel_id);
 
             let kernel_id = response.kernel_id.clone();
             let connection_info: serde_json::Value =

@@ -137,14 +137,30 @@ impl WslRunningKernel {
                 .arg(working_directory.to_string_lossy().to_string());
 
             let wd_output = wslpath_wd_cmd.output().await;
-            let wsl_working_directory = if let Ok(output) = wd_output {
-                if output.status.success() {
-                    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
-                } else {
+            let wsl_working_directory = match wd_output {
+                Ok(output) => {
+                    if output.status.success() {
+                        Some(
+                            String::from_utf8_lossy(&output.stdout)
+                                .trim()
+                                .to_string(),
+                        )
+                    } else {
+                        log::warn!(
+                            "WSL kernel: failed to convert working directory to WSL path. Status: {:?}, Stderr: {}",
+                            output.status,
+                            String::from_utf8_lossy(&output.stderr)
+                        );
+                        None
+                    }
+                }
+                Err(e) => {
+                    log::warn!(
+                        "WSL kernel: failed to execute wslpath for working directory: {:?}",
+                        e
+                    );
                     None
                 }
-            } else {
-                None
             };
             log::info!(
                 "WSL kernel: converted working directory to WSL path: {:?}",
@@ -427,18 +443,24 @@ impl Drop for WslRunningKernel {
 pub async fn wsl_kernel_specifications(
     background_executor: BackgroundExecutor,
 ) -> Result<Vec<KernelSpecification>> {
+    log::info!("WSL kernel: fetching specifications...");
     let output = util::command::new_smol_command("wsl")
         .arg("-l")
         .arg("-q")
         .output()
         .await;
 
-    if output.is_err() {
+    if let Err(e) = &output {
+        log::error!("WSL kernel: failed to list distros: {:?}", e);
         return Ok(Vec::new());
     }
 
     let output = output.unwrap();
     if !output.status.success() {
+        log::error!(
+            "WSL kernel: wsl -l -q returned failure status: {:?}",
+            output.status
+        );
         return Ok(Vec::new());
     }
 
@@ -460,6 +482,7 @@ pub async fn wsl_kernel_specifications(
     } else {
         String::from_utf8_lossy(&stdout).to_string()
     };
+    log::info!("WSL kernel: found distros raw string: {:?}", distros_str);
 
     let distros: Vec<String> = distros_str
         .lines()
@@ -467,36 +490,64 @@ pub async fn wsl_kernel_specifications(
         .filter(|line| !line.is_empty())
         .collect();
 
+    log::info!("WSL kernel: parsed distros: {:?}", distros);
+
     let tasks = distros.into_iter().map(|distro| {
         background_executor.spawn(async move {
+            log::info!("WSL kernel: listing kernels for distro: {}", distro);
             let output = util::command::new_smol_command("wsl")
                 .arg("-d")
                 .arg(&distro)
-                .arg("jupyter")
-                .arg("kernelspec")
-                .arg("list")
-                .arg("--json")
+                .arg("bash")
+                .arg("-c")
+                .arg("jupyter kernelspec list --json")
                 .output()
                 .await;
 
-            if let Ok(output) = output {
-                if output.status.success() {
-                    let json_str = String::from_utf8_lossy(&output.stdout);
-                    if let Ok(specs_response) =
-                        serde_json::from_str::<KernelSpecsResponse>(&json_str)
-                    {
-                        return specs_response
-                            .kernelspecs
-                            .into_iter()
-                            .map(|(name, spec)| {
-                                KernelSpecification::WslRemote(WslKernelSpecification {
-                                    name,
-                                    kernelspec: spec.spec,
-                                    distro: distro.clone(),
+            match output {
+                Ok(output) => {
+                    if output.status.success() {
+                        let json_str = String::from_utf8_lossy(&output.stdout);
+                        log::info!(
+                            "WSL kernel: got kernelspec json for {}: {}",
+                            distro,
+                            json_str
+                        );
+                        if let Ok(specs_response) =
+                            serde_json::from_str::<KernelSpecsResponse>(&json_str)
+                        {
+                            return specs_response
+                                .kernelspecs
+                                .into_iter()
+                                .map(|(name, spec)| {
+                                    KernelSpecification::WslRemote(WslKernelSpecification {
+                                        name,
+                                        kernelspec: spec.spec,
+                                        distro: distro.clone(),
+                                    })
                                 })
-                            })
-                            .collect::<Vec<_>>();
+                                .collect::<Vec<_>>();
+                        } else {
+                            log::error!(
+                                "WSL kernel: failed to parse kernelspec json for {}: {:?}",
+                                distro,
+                                json_str
+                            );
+                        }
+                    } else {
+                        log::error!(
+                            "WSL kernel: jupyter kernelspec list failed for {}: {:?}",
+                            distro,
+                            output
+                        );
                     }
+                }
+                Err(e) => {
+                    log::error!(
+                        "WSL kernel: failed to run jupyter kernelspec list for {}: {:?}",
+                        distro,
+                        e
+                    );
                 }
             }
 
