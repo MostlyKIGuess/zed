@@ -39,7 +39,6 @@ pub use terminal::*;
 use action_log::{ActionLog, ActionLogTelemetry};
 use agent_client_protocol::{self as acp};
 use anyhow::{Context as _, Result, anyhow};
-use editor::Bias;
 use futures::{FutureExt, channel::oneshot, future::BoxFuture};
 use gpui::{AppContext, AsyncApp, Context, Entity, EventEmitter, SharedString, Task, WeakEntity};
 use itertools::Itertools;
@@ -54,6 +53,7 @@ use std::process::ExitStatus;
 use std::rc::Rc;
 use std::time::{Duration, Instant};
 use std::{fmt::Display, mem, path::PathBuf, sync::Arc};
+use text::Bias;
 use ui::App;
 use util::{ResultExt, get_default_system_shell_preferring_bash, paths::PathStyle};
 use uuid::Uuid;
@@ -477,7 +477,7 @@ pub enum ToolCallStatus {
     Pending,
     /// The tool call is waiting for confirmation from the user.
     WaitingForConfirmation {
-        options: Vec<acp::PermissionOption>,
+        options: PermissionOptions,
         respond_tx: oneshot::Sender<acp::PermissionOptionId>,
     },
     /// The tool call is currently running.
@@ -1717,7 +1717,7 @@ impl AcpThread {
     pub fn request_tool_call_authorization(
         &mut self,
         tool_call: acp::ToolCallUpdate,
-        options: Vec<acp::PermissionOption>,
+        options: PermissionOptions,
         respect_always_allow_setting: bool,
         cx: &mut Context<Self>,
     ) -> Result<BoxFuture<'static, acp::RequestPermissionOutcome>> {
@@ -1726,13 +1726,7 @@ impl AcpThread {
         if respect_always_allow_setting && AgentSettings::get_global(cx).always_allow_tool_actions {
             // Don't use AllowAlways, because then if you were to turn off always_allow_tool_actions,
             // some tools would (incorrectly) continue to auto-accept.
-            if let Some(allow_once_option) = options.iter().find_map(|option| {
-                if matches!(option.kind, acp::PermissionOptionKind::AllowOnce) {
-                    Some(option.option_id.clone())
-                } else {
-                    None
-                }
-            }) {
+            if let Some(allow_once_option) = options.allow_once_option_id() {
                 self.upsert_tool_call_inner(tool_call, ToolCallStatus::Pending, cx)?;
                 return Ok(async {
                     acp::RequestPermissionOutcome::Selected(acp::SelectedPermissionOutcome::new(
@@ -1917,18 +1911,18 @@ impl AcpThread {
         })
     }
 
-    pub fn can_resume(&self, cx: &App) -> bool {
-        self.connection.resume(&self.session_id, cx).is_some()
+    pub fn can_retry(&self, cx: &App) -> bool {
+        self.connection.retry(&self.session_id, cx).is_some()
     }
 
-    pub fn resume(&mut self, cx: &mut Context<Self>) -> BoxFuture<'static, Result<()>> {
+    pub fn retry(&mut self, cx: &mut Context<Self>) -> BoxFuture<'static, Result<()>> {
         self.run_turn(cx, async move |this, cx| {
             this.update(cx, |this, cx| {
                 this.connection
-                    .resume(&this.session_id, cx)
-                    .map(|resume| resume.run(cx))
+                    .retry(&this.session_id, cx)
+                    .map(|retry| retry.run(cx))
             })?
-            .context("resuming a session is not supported")?
+            .context("retrying a session is not supported")?
             .await
         })
     }
@@ -2639,6 +2633,8 @@ mod tests {
                 ::terminal::terminal_settings::AlternateScroll::On,
                 None,
                 0,
+                cx.background_executor(),
+                PathStyle::local(),
             )
             .unwrap();
             builder.subscribe(cx)
@@ -2712,6 +2708,8 @@ mod tests {
                 ::terminal::terminal_settings::AlternateScroll::On,
                 None,
                 0,
+                cx.background_executor(),
+                PathStyle::local(),
             )
             .unwrap();
             builder.subscribe(cx)
@@ -2798,6 +2796,7 @@ mod tests {
                     Some(completion_tx),
                     cx,
                     vec![],
+                    PathStyle::local(),
                 )
             })
             .await
@@ -4086,6 +4085,8 @@ mod tests {
                 ::terminal::terminal_settings::AlternateScroll::On,
                 None,
                 0,
+                cx.background_executor(),
+                PathStyle::local(),
             )
             .unwrap();
             builder.subscribe(cx)
@@ -4131,6 +4132,8 @@ mod tests {
                 ::terminal::terminal_settings::AlternateScroll::On,
                 None,
                 0,
+                cx.background_executor(),
+                PathStyle::local(),
             )
             .unwrap();
             builder.subscribe(cx)
@@ -4190,6 +4193,8 @@ mod tests {
                 ::terminal::terminal_settings::AlternateScroll::On,
                 None,
                 0,
+                cx.background_executor(),
+                PathStyle::local(),
             )
             .unwrap();
             builder.subscribe(cx)
