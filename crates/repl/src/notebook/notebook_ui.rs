@@ -386,15 +386,9 @@ impl NotebookEditor {
                 let project = self.project.clone();
                 SshRunningKernel::new(spec, working_directory, project, view, window, cx)
             }
-            KernelSpecification::WslRemote(spec) => WslRunningKernel::new(
-                spec,
-                entity_id,
-                working_directory,
-                fs,
-                view,
-                window,
-                cx,
-            ),
+            KernelSpecification::WslRemote(spec) => {
+                WslRunningKernel::new(spec, entity_id, working_directory, fs, view, window, cx)
+            }
         };
 
         let pending_kernel = cx
@@ -410,6 +404,7 @@ impl NotebookEditor {
                         .ok();
                     }
                     Err(err) => {
+                        log::error!("Kernel failed to start: {:?}", err);
                         this.update(cx, |editor, cx| {
                             editor.kernel = Kernel::ErroredLaunch(err.to_string());
                             cx.notify();
@@ -1512,10 +1507,12 @@ impl Item for NotebookEditor {
         let notebook_language = self.notebook_language.clone();
 
         cx.spawn_in(window, async move |this, cx| {
-            let buffer = this.update(cx, |this, cx| {
-                this.project
-                    .update(cx, |project, cx| project.open_buffer(project_path, cx))
-            })?.await?;
+            let buffer = this
+                .update(cx, |this, cx| {
+                    this.project
+                        .update(cx, |project, cx| project.open_buffer(project_path, cx))
+                })?
+                .await?;
 
             let file_content = buffer.read_with(cx, |buffer, _| buffer.text().to_string());
 

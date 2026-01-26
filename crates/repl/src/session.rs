@@ -320,6 +320,7 @@ impl Session {
                         .ok();
                     }
                     Err(err) => {
+                        log::error!("Kernel failed to start: {:?}", err);
                         this.update(cx, |session, cx| {
                             session.kernel_errored(err.to_string(), cx);
                         })

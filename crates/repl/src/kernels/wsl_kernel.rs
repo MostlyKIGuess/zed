@@ -68,6 +68,7 @@ impl WslRunningKernel {
         window.spawn(cx, async move |cx| {
             let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
             let ports = peek_ports(ip).await?;
+            log::info!("WSL kernel: picked ports: {:?}", ports);
 
             let connection_info = ConnectionInfo {
                 transport: Transport::TCP,
@@ -89,6 +90,7 @@ impl WslRunningKernel {
             let connection_path = runtime_dir.join(format!("kernel-zed-wsl-{entity_id}.json"));
             let content = serde_json::to_string(&connection_info)?;
             fs.atomic_write(connection_path.clone(), content).await?;
+            log::info!("WSL kernel: wrote connection file to {:?}", connection_path);
 
             // Convert connection_path to WSL path
             // We assume wslpath is available inside WSL, or we can run it from Windows against the distro.
@@ -106,6 +108,10 @@ impl WslRunningKernel {
                 anyhow::bail!("Failed to convert path to WSL path: {:?}", output);
             }
             let wsl_connection_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            log::info!(
+                "WSL kernel: converted connection path to WSL path: {}",
+                wsl_connection_path
+            );
 
             // Construct the kernel command
             // The kernel spec argv might have absolute paths valid INSIDE WSL.
@@ -139,6 +145,10 @@ impl WslRunningKernel {
             } else {
                 None
             };
+            log::info!(
+                "WSL kernel: converted working directory to WSL path: {:?}",
+                wsl_working_directory
+            );
 
             let mut cmd = util::command::new_smol_command("wsl");
             cmd.arg("-d").arg(&kernel_specification.distro);
@@ -164,6 +174,8 @@ impl WslRunningKernel {
                 }
             }
 
+            log::info!("WSL kernel: spawning command: {:?}", cmd);
+
             let mut process = cmd
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -174,13 +186,17 @@ impl WslRunningKernel {
 
             let session_id = Uuid::new_v4().to_string();
 
+            log::info!("WSL kernel: creating client iopub connection");
             let mut iopub_socket =
                 runtimelib::create_client_iopub_connection(&connection_info, "", &session_id)
                     .await?;
+            log::info!("WSL kernel: creating client shell connection");
             let mut shell_socket =
                 runtimelib::create_client_shell_connection(&connection_info, &session_id).await?;
+            log::info!("WSL kernel: creating client control connection");
             let mut control_socket =
                 runtimelib::create_client_control_connection(&connection_info, &session_id).await?;
+            log::info!("WSL kernel: client connections created");
 
             let (request_tx, mut request_rx) =
                 futures::channel::mpsc::channel::<JupyterMessage>(100);
