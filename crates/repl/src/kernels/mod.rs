@@ -160,6 +160,11 @@ pub fn python_env_kernel_specifications(
         python_language,
         cx,
     );
+    let worktree_root_path = project
+        .read(cx)
+        .worktree_for_id(worktree_id, cx)
+        .map(|w| w.read(cx).abs_path().clone());
+
     let background_executor = cx.background_executor().clone();
 
     async move {
@@ -249,11 +254,66 @@ pub fn python_env_kernel_specifications(
                 })
             });
 
-        let kernel_specs = futures::future::join_all(kernelspecs)
+        let mut kernel_specs: Vec<KernelSpecification> = futures::future::join_all(kernelspecs)
             .await
             .into_iter()
             .flatten()
             .collect();
+
+        #[cfg(target_os = "windows")]
+        if kernel_specs.is_empty() && !is_remote {
+            if let Some(root_path) = worktree_root_path {
+                let root_path_str = root_path.to_string_lossy();
+                let (distro, internal_path) = if root_path_str.starts_with(r"\\wsl$\") {
+                    let path_without_prefix = &root_path_str[r"\\wsl$\".len()..];
+                    if let Some((distro, path)) = path_without_prefix.split_once('\\') {
+                        (Some(distro), Some(format!("/{}", path.replace('\\', "/"))))
+                    } else {
+                        (Some(path_without_prefix), Some("/".to_string()))
+                    }
+                } else if root_path_str.starts_with(r"\\wsl.localhost\") {
+                    let path_without_prefix = &root_path_str[r"\\wsl.localhost\".len()..];
+                    if let Some((distro, path)) = path_without_prefix.split_once('\\') {
+                        (Some(distro), Some(format!("/{}", path.replace('\\', "/"))))
+                    } else {
+                        (Some(path_without_prefix), Some("/".to_string()))
+                    }
+                } else {
+                    (None, None)
+                };
+
+                if let (Some(distro), Some(internal_path)) = (distro, internal_path) {
+                    let python_path = format!("{}/.venv/bin/python", internal_path);
+                    let check = util::command::new_smol_command("wsl")
+                        .args(&["-d", distro, "test", "-f", &python_path])
+                        .output()
+                        .await;
+
+                    if check.is_ok() && check.unwrap().status.success() {
+                        let default_kernelspec = JupyterKernelspec {
+                            argv: vec![
+                                python_path.clone(),
+                                "-m".to_string(),
+                                "ipykernel_launcher".to_string(),
+                                "-f".to_string(),
+                                "{connection_file}".to_string(),
+                            ],
+                            display_name: format!("WSL: {} (.venv)", distro),
+                            language: "python".to_string(),
+                            interrupt_mode: None,
+                            metadata: None,
+                            env: None,
+                        };
+
+                        kernel_specs.push(KernelSpecification::WslRemote(WslKernelSpecification {
+                            name: format!("WSL: {} (.venv)", distro),
+                            kernelspec: default_kernelspec,
+                            distro: distro.to_string(),
+                        }));
+                    }
+                }
+            }
+        }
 
         anyhow::Ok(kernel_specs)
     }
