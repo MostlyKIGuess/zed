@@ -8,6 +8,7 @@ use futures::{
 };
 use gpui::{App, Entity, Task, Window};
 use language::LanguageName;
+use log;
 pub use native_kernel::*;
 
 mod remote_kernels;
@@ -149,6 +150,7 @@ pub fn python_env_kernel_specifications(
 ) -> impl Future<Output = Result<Vec<KernelSpecification>>> + use<> {
     let python_language = LanguageName::new_static("Python");
     let is_remote = project.read(cx).is_remote();
+    log::info!("python_env_kernel_specifications: is_remote: {}", is_remote);
 
     let toolchains = project.read(cx).available_toolchains(
         ProjectPath {
@@ -184,6 +186,10 @@ pub fn python_env_kernel_specifications(
                     // `new_smol_command` runs locally. We need to run remotely if `is_remote`.
 
                     if is_remote {
+                        log::info!(
+                            "python_env_kernel_specifications: returning SshRemote for toolchain {}",
+                            toolchain.name
+                        );
                         let default_kernelspec = JupyterKernelspec {
                             argv: vec![
                                 "python3".to_string(), // using generic python3 for now on remote
@@ -234,6 +240,10 @@ pub fn python_env_kernel_specifications(
                             kernelspec: default_kernelspec,
                         }))
                     } else {
+                        log::info!(
+                            "python_env_kernel_specifications: ipykernel check failed for toolchain {}",
+                            toolchain.name
+                        );
                         None
                     }
                 })

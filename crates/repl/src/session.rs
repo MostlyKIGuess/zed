@@ -21,6 +21,7 @@ use editor::{
     },
     scroll::Autoscroll,
 };
+use log;
 use project::InlayId;
 
 /// Marker types

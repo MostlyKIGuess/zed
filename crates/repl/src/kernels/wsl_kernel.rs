@@ -12,6 +12,7 @@ use jupyter_protocol::{
     connection_info::{ConnectionInfo, Transport},
 };
 use jupyter_websocket_client::KernelSpecsResponse;
+use log;
 use project::Fs;
 use runtimelib::dirs;
 use smol::net::TcpListener;

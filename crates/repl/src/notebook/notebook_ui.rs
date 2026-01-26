@@ -14,6 +14,7 @@ use gpui::{
 };
 use jupyter_protocol::JupyterKernelspec;
 use language::{Language, LanguageRegistry};
+use log;
 use project::{Project, ProjectEntryId, ProjectPath};
 use settings::Settings as _;
 use ui::{CommonAnimationExt, Tooltip, prelude::*};
