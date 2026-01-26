@@ -513,9 +513,21 @@ impl LocalToolchainStore {
         cx.spawn(async move |this, cx| {
             let language = cx
                 .background_spawn(registry.language_for_name(language_name.as_ref()))
-                .await
-                .ok()?;
-            let toolchains = language.toolchain_lister()?;
+                .await;
+            
+            if language.is_err() {
+                 log::warn!("list_toolchains: language {} not found", language_name);
+                 return None;
+            }
+            let language = language.ok()?;
+
+            let toolchains = language.toolchain_lister();
+            if toolchains.is_none() {
+                 log::warn!("list_toolchains: no toolchain lister for language {}", language_name);
+                 return None;
+            }
+            let toolchains = toolchains?;
+
             let manifest_name = toolchains.meta().manifest_name;
             let (snapshot, worktree) = this
                 .update(cx, |this, cx| {
@@ -533,8 +545,14 @@ impl LocalToolchainStore {
             let relative_path = manifest_tree
                 .update(cx, |this, cx| {
                     this.root_for_path(&path, &manifest_name, &delegate, cx)
-                })
-                .ok()?
+                });
+            
+            if relative_path.is_err() {
+                 log::warn!("list_toolchains: manifest query failed for language {}", language_name);
+                 return None;
+            }
+
+            let relative_path = relative_path.ok()?
                 .unwrap_or_else(|| ProjectPath {
                     path: Arc::from(RelPath::empty()),
                     worktree_id,
@@ -683,8 +701,17 @@ impl RemoteToolchainStore {
                     language_name: language_name.clone().into(),
                     path: Some(path.path.to_proto()),
                 })
-                .await
-                .log_err()?;
+                .await;
+
+            if let Err(e) = &response {
+                log::warn!(
+                    "RemoteToolchainStore::list_toolchains: RPC failed for language {}: {:?}",
+                    language_name,
+                    e
+                );
+                return None;
+            }
+            let response = response.ok()?;
             if !response.has_values {
                 return None;
             }
