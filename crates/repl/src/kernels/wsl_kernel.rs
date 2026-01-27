@@ -174,6 +174,7 @@ impl WslRunningKernel {
             );
 
             // Convert working dir
+            log::info!("WSL kernel: converting working directory: {:?}", working_directory);
             let mut wslpath_wd_cmd = util::command::new_smol_command("wsl");
             let working_directory_str = working_directory.to_string_lossy().replace('\\', "/");
 
@@ -187,11 +188,15 @@ impl WslRunningKernel {
             let wd_output = wslpath_wd_cmd.output().await;
             let wsl_working_directory = if let Ok(output) = wd_output {
                 if output.status.success() {
-                    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+                    let wd = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    log::info!("WSL kernel: converted working directory to: {}", wd);
+                    Some(wd)
                 } else {
+                    log::warn!("WSL kernel: wslpath conversion failed with status: {:?}", output.status);
                     None
                 }
             } else {
+                log::warn!("WSL kernel: wslpath conversion command failed");
                 None
             };
 
@@ -203,7 +208,10 @@ impl WslRunningKernel {
             cmd.current_dir(std::env::temp_dir());
 
             if let Some(wd) = wsl_working_directory.as_ref() {
+                log::info!("WSL kernel: using --cd {}", wd);
                 cmd.arg("--cd").arg(wd);
+            } else {
+                log::warn!("WSL kernel: no working directory set, will use WSL default");
             }
 
             // Build the command to run inside WSL
