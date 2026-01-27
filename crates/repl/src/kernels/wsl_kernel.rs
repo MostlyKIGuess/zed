@@ -238,7 +238,7 @@ impl WslRunningKernel {
             });
 
             let shell_command = if needs_python_resolution {
-                // Build a robust Python resolution command:
+                // Build a robust Python resolution command with better debugging
                 // 1. Check for .venv/bin/python or .venv/bin/python3
                 // 2. Fall back to system python3 or python
                 let rest_args: Vec<String> = kernel_args.iter().skip(1).cloned().collect();
@@ -255,14 +255,31 @@ impl WslRunningKernel {
                     .join(" ");
 
                 format!(
-                    "PYTHON_CMD=''; \
-                     if [ -x .venv/bin/python ]; then PYTHON_CMD='.venv/bin/python'; \
-                     elif [ -x .venv/bin/python3 ]; then PYTHON_CMD='.venv/bin/python3'; \
-                     elif command -v python3 >/dev/null 2>&1; then PYTHON_CMD='python3'; \
-                     elif command -v python >/dev/null 2>&1; then PYTHON_CMD='python'; \
-                     else echo 'Error: Python not found' >&2; exit 127; fi; \
+                    "set -e; \
+                     PYTHON_CMD=''; \
+                     echo \"Working directory: $(pwd)\" >&2; \
+                     echo \"Checking for Python...\" >&2; \
+                     if [ -x .venv/bin/python ]; then \
+                       PYTHON_CMD='.venv/bin/python'; \
+                       echo \"Found: $PYTHON_CMD\" >&2; \
+                     elif [ -x .venv/bin/python3 ]; then \
+                       PYTHON_CMD='.venv/bin/python3'; \
+                       echo \"Found: $PYTHON_CMD\" >&2; \
+                     elif command -v python3 >/dev/null 2>&1; then \
+                       PYTHON_CMD=$(command -v python3); \
+                       echo \"Found: $PYTHON_CMD\" >&2; \
+                     elif command -v python >/dev/null 2>&1; then \
+                       PYTHON_CMD=$(command -v python); \
+                       echo \"Found: $PYTHON_CMD\" >&2; \
+                     else \
+                       echo 'Error: Python not found in .venv or PATH' >&2; \
+                       echo 'Contents of current directory:' >&2; \
+                       ls -la >&2; \
+                       exit 127; \
+                     fi; \
+                     echo \"Executing: $PYTHON_CMD {}\" >&2; \
                      exec \"$PYTHON_CMD\" {}",
-                    rest_string
+                    rest_string, rest_string
                 )
             } else {
                 // Command has absolute path, use as-is
