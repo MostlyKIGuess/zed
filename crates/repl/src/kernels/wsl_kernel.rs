@@ -67,10 +67,42 @@ impl WslRunningKernel {
         cx: &mut App,
     ) -> Task<Result<Box<dyn RunningKernel>>> {
         window.spawn(cx, async move |cx| {
-            // Bind to 0.0.0.0 to ensure the kernel listens on all interfaces (localhost + WSL vNIC)
+            log::info!("WSL kernel: starting kernel setup for distro {}", kernel_specification.distro);
+            
+            // For WSL2, we need to get the WSL VM's IP address to connect to it
+            // because WSL2 runs in a lightweight VM with its own network namespace.
+            // The kernel will bind to 0.0.0.0 inside WSL, and we connect to the VM's IP.
             let bind_ip = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
-            // Connect via 127.0.0.1 (localhost) which Windows forwards to WSL
-            let connect_ip = "127.0.0.1".to_string();
+            
+            let connect_ip = {
+                let mut wsl_ip_cmd = util::command::new_smol_command("wsl");
+                wsl_ip_cmd
+                    .arg("-d")
+                    .arg(&kernel_specification.distro)
+                    .arg("hostname")
+                    .arg("-I");
+                
+                let output = wsl_ip_cmd.output().await;
+                if let Ok(output) = output {
+                    if output.status.success() {
+                        let ip_str = String::from_utf8_lossy(&output.stdout);
+                        // just take the first one from hostname
+                        if let Some(ip) = ip_str.split_whitespace().next() {
+                            log::info!("WSL kernel: using WSL VM IP address: {}", ip);
+                            ip.to_string()
+                        } else {
+                            log::warn!("WSL kernel: could not parse WSL IP, falling back to 127.0.0.1");
+                            "127.0.0.1".to_string()
+                        }
+                    } else {
+                        log::warn!("WSL kernel: hostname -I failed, falling back to 127.0.0.1");
+                        "127.0.0.1".to_string()
+                    }
+                } else {
+                    log::warn!("WSL kernel: could not get WSL IP, falling back to 127.0.0.1");
+                    "127.0.0.1".to_string()
+                }
+            };
 
             let ports = peek_ports(bind_ip).await?;
             log::info!("WSL kernel: picked ports: {:?}", ports);
@@ -196,6 +228,7 @@ impl WslRunningKernel {
                 }
             }
 
+            log::info!("WSL kernel: spawning kernel process...");
             let mut process = cmd
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -203,24 +236,62 @@ impl WslRunningKernel {
                 .kill_on_drop(true)
                 .spawn()
                 .context("failed to start the kernel process")?;
+            log::info!("WSL kernel: kernel process spawned successfully");
 
             let session_id = Uuid::new_v4().to_string();
 
             let mut client_connection_info = connection_info.clone();
-            client_connection_info.ip = connect_ip;
+            client_connection_info.ip = connect_ip.clone();
+            log::info!(
+                "WSL kernel: connecting to kernel at {}:{} (shell), {}:{} (iopub), {}:{} (control)",
+                connect_ip,
+                client_connection_info.shell_port,
+                connect_ip,
+                client_connection_info.iopub_port,
+                connect_ip,
+                client_connection_info.control_port
+            );
 
+            // Give the kernel a moment to start and bind to ports.
+            // WSL kernel startup can be slow, especially on first run.
+            log::info!("WSL kernel: waiting for kernel to initialize...");
+            cx.background_executor()
+                .timer(std::time::Duration::from_secs(2))
+                .await;
+            
+            // Check if the process is still running
+            match process.try_status() {
+                Ok(Some(status)) => {
+                    anyhow::bail!("WSL kernel process exited prematurely with status: {:?}", status);
+                }
+                Ok(None) => {
+                    log::info!("WSL kernel: kernel process is still running");
+                }
+                Err(e) => {
+                    log::warn!("WSL kernel: could not check process status: {:?}", e);
+                }
+            }
+
+            log::info!("WSL kernel: creating iopub socket...");
             let mut iopub_socket = runtimelib::create_client_iopub_connection(
                 &client_connection_info,
                 "",
                 &session_id,
             )
             .await?;
+            log::info!("WSL kernel: iopub socket created");
+            
+            log::info!("WSL kernel: creating shell socket...");
             let mut shell_socket =
                 runtimelib::create_client_shell_connection(&client_connection_info, &session_id)
                     .await?;
+            log::info!("WSL kernel: shell socket created");
+            
+            log::info!("WSL kernel: creating control socket...");
             let mut control_socket =
                 runtimelib::create_client_control_connection(&client_connection_info, &session_id)
                     .await?;
+            log::info!("WSL kernel: control socket created - all sockets ready");
 
             let (request_tx, mut request_rx) =
                 futures::channel::mpsc::channel::<JupyterMessage>(100);
@@ -252,8 +323,10 @@ impl WslRunningKernel {
                 let session = session.clone();
 
                 async move |cx| -> anyhow::Result<()> {
+                    log::info!("WSL kernel: iopub task started, waiting for messages...");
                     loop {
                         let message = iopub_socket.read().await?;
+                        log::debug!("WSL kernel: received iopub message: {:?}", message.content);
                         session
                             .update_in(cx, |session, window, cx| {
                                 session.route(&message, window, cx);
@@ -374,14 +447,14 @@ impl WslRunningKernel {
                 let error_message = match status.await {
                     Ok(status) => {
                         if status.success() {
-                            log::info!("kernel process exited successfully");
+                            log::info!("WSL kernel: kernel process exited successfully");
                             return;
                         }
 
-                        format!("kernel process exited with status: {:?}", status)
+                        format!("WSL kernel: kernel process exited with status: {:?}", status)
                     }
                     Err(err) => {
-                        format!("kernel process exited with error: {:?}", err)
+                        format!("WSL kernel: kernel process exited with error: {:?}", err)
                     }
                 };
 
@@ -394,6 +467,7 @@ impl WslRunningKernel {
                 });
             });
 
+            log::info!("WSL kernel: kernel initialization complete, returning RunningKernel");
             anyhow::Ok(Box::new(Self {
                 process,
                 request_tx,
