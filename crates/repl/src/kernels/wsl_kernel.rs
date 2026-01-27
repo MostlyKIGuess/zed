@@ -11,7 +11,7 @@ use jupyter_protocol::{
     ExecutionState, JupyterMessage, JupyterMessageContent, KernelInfoReply,
     connection_info::{ConnectionInfo, Transport},
 };
-use jupyter_websocket_client::KernelSpecsResponse;
+
 use log;
 use project::Fs;
 use runtimelib::dirs;
@@ -94,15 +94,25 @@ impl WslRunningKernel {
             log::info!("WSL kernel: wrote connection file to {:?}", connection_path);
 
             // Convert connection_path to WSL path
-            // We assume wslpath is available inside WSL, or we can run it from Windows against the distro.
+            // yeah we can't assume this is available on WSL.
             // running `wsl -d <distro> wslpath -u <windows_path>`
             let mut wslpath_cmd = util::command::new_smol_command("wsl");
+
+            // On Windows, passing paths with backslashes to wsl.exe can sometimes cause
+            // escaping issues or be misinterpreted. Converting to forward slashes is safer
+            // and often accepted by wslpath.
+            let connection_path_str = connection_path.to_string_lossy().replace('\\', "/");
+            log::info!(
+                "WSL kernel: converting connection path: {}",
+                connection_path_str
+            );
+
             wslpath_cmd
                 .arg("-d")
                 .arg(&kernel_specification.distro)
                 .arg("wslpath")
                 .arg("-u")
-                .arg(connection_path.to_string_lossy().to_string());
+                .arg(&connection_path_str);
 
             let output = wslpath_cmd.output().await?;
             if !output.status.success() {
@@ -125,12 +135,14 @@ impl WslRunningKernel {
 
             // Convert working dir
             let mut wslpath_wd_cmd = util::command::new_smol_command("wsl");
+            let working_directory_str = working_directory.to_string_lossy().replace('\\', "/");
+
             wslpath_wd_cmd
                 .arg("-d")
                 .arg(&kernel_specification.distro)
                 .arg("wslpath")
                 .arg("-u")
-                .arg(working_directory.to_string_lossy().to_string());
+                .arg(&working_directory_str);
 
             let wd_output = wslpath_wd_cmd.output().await;
             let wsl_working_directory = if let Ok(output) = wd_output {
@@ -145,7 +157,7 @@ impl WslRunningKernel {
 
             let mut cmd = util::command::new_smol_command("wsl");
             cmd.arg("-d").arg(&kernel_specification.distro);
-            
+
             // Set CWD for the host process to a safe location to avoid "Directory name is invalid"
             // if the project root is a path not supported by Windows CWD (e.g. UNC path for some tools).
             cmd.current_dir(std::env::temp_dir());
@@ -431,7 +443,7 @@ struct LocalKernelSpecContent {
     language: String,
     interrupt_mode: Option<String>,
     env: Option<std::collections::HashMap<String, String>>,
-    metadata: Option<serde_json::Value>,
+    metadata: Option<std::collections::HashMap<String, serde_json::Value>>,
 }
 
 pub async fn wsl_kernel_specifications(
@@ -492,6 +504,7 @@ pub async fn wsl_kernel_specifications(
             if let Ok(output) = output {
                 if output.status.success() {
                     let json_str = String::from_utf8_lossy(&output.stdout);
+                    // Use local permissive struct instead of strict KernelSpecsResponse from jupyter-protocol
                     if let Ok(specs_response) =
                         serde_json::from_str::<LocalKernelSpecsResponse>(&json_str)
                     {
@@ -530,6 +543,6 @@ pub async fn wsl_kernel_specifications(
         .into_iter()
         .flatten()
         .collect();
-    
+
     Ok(specs)
 }
