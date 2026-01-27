@@ -206,36 +206,46 @@ impl WslRunningKernel {
                 cmd.arg("--cd").arg(wd);
             }
 
-            // `exec "$@"` executes the arguments passed after `--`.
-            cmd.arg("bash")
-                .arg("-l")
-                .arg("-c")
-                .arg("exec \"$@\"")
-                .arg("--");
-
+            // We use bash -lc to run in a login shell for proper environment setup
             let mut kernel_args: Vec<String> = Vec::new();
 
             if let Some(env) = &kernel_specification.kernelspec.env {
-                cmd.arg("env");
-                kernel_args.push("env".to_string());
-                for (k, v) in env {
-                    let env_arg = format!("{}={}", k, v);
-                    cmd.arg(&env_arg);
-                    kernel_args.push(env_arg);
+                if !env.is_empty() {
+                    kernel_args.push("env".to_string());
+                    for (k, v) in env {
+                        kernel_args.push(format!("{}={}", k, v));
+                    }
                 }
             }
 
             for arg in argv {
                 if arg == "{connection_file}" {
-                    cmd.arg(&wsl_connection_path);
                     kernel_args.push(wsl_connection_path.clone());
                 } else {
-                    cmd.arg(&arg);
                     kernel_args.push(arg.clone());
                 }
             }
 
-            log::info!("WSL kernel: kernel command args: {:?}", kernel_args);
+            // shell command string - escape single quotes in args
+            let shell_command = kernel_args
+                .iter()
+                .map(|arg| {
+                    if arg.contains(' ') || arg.contains('\'') || arg.contains('"') {
+                        format!("'{}'", arg.replace('\'', "'\\''"))
+                    } else {
+                        arg.clone()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            log::info!("WSL kernel: shell command: {}", shell_command);
+
+            cmd.arg("bash")
+                .arg("-l")
+                .arg("-c")
+                .arg(&shell_command);
+
             log::info!("WSL kernel: spawning kernel process...");
             let mut process = cmd
                 .stdout(std::process::Stdio::piped())
