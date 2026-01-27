@@ -229,17 +229,20 @@ impl WslRunningKernel {
 
             // If the first command is just "python", "python3", or a relative path,
             // we need to ensure it's found in the environment.
-            // using a shell wrapper that activates venv if present or uses 'which' to find python.
-            let needs_python_resolution = kernel_args.first().map_or(false, |arg| {
-                let cmd = arg.split_whitespace().next().unwrap_or(arg);
+            let first_cmd = kernel_args.first().map(|arg| {
+                arg.split_whitespace().next().unwrap_or(arg)
+            });
+            
+            let needs_python_resolution = first_cmd.map_or(false, |cmd| {
                 cmd == "python" || cmd == "python3" || !cmd.starts_with('/')
             });
 
             let shell_command = if needs_python_resolution {
-                // Wrap the command to handle Python resolution:
-                // 1. If there's a .venv in the working directory, activate it
-                // 2. Otherwise, try to use python3 or python from PATH
-                let args_string = kernel_args
+                // Build a robust Python resolution command:
+                // 1. Check for .venv/bin/python or .venv/bin/python3
+                // 2. Fall back to system python3 or python
+                let rest_args: Vec<String> = kernel_args.iter().skip(1).cloned().collect();
+                let rest_string = rest_args
                     .iter()
                     .map(|arg| {
                         if arg.contains(' ') || arg.contains('\'') || arg.contains('"') {
@@ -252,10 +255,17 @@ impl WslRunningKernel {
                     .join(" ");
 
                 format!(
-                    "if [ -f .venv/bin/activate ]; then source .venv/bin/activate; fi; exec {}",
-                    args_string
+                    "PYTHON_CMD=''; \
+                     if [ -x .venv/bin/python ]; then PYTHON_CMD='.venv/bin/python'; \
+                     elif [ -x .venv/bin/python3 ]; then PYTHON_CMD='.venv/bin/python3'; \
+                     elif command -v python3 >/dev/null 2>&1; then PYTHON_CMD='python3'; \
+                     elif command -v python >/dev/null 2>&1; then PYTHON_CMD='python'; \
+                     else echo 'Error: Python not found' >&2; exit 127; fi; \
+                     exec \"$PYTHON_CMD\" {}",
+                    rest_string
                 )
             } else {
+                // Command has absolute path, use as-is
                 kernel_args
                     .iter()
                     .map(|arg| {
