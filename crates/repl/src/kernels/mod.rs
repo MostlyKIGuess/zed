@@ -176,15 +176,8 @@ pub fn python_env_kernel_specifications(
         {
             (toolchains, user_toolchains)
         } else {
-            log::warn!("python_env_kernel_specifications: no toolchains found");
             return Ok(Vec::new());
         };
-
-        log::info!(
-            "python_env_kernel_specifications: found {} toolchains and {} user toolchains",
-            toolchains.toolchains.len(),
-            user_toolchains.len()
-        );
 
         let kernelspecs = user_toolchains
             .into_values()
