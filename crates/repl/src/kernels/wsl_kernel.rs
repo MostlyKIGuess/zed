@@ -67,13 +67,17 @@ impl WslRunningKernel {
         cx: &mut App,
     ) -> Task<Result<Box<dyn RunningKernel>>> {
         window.spawn(cx, async move |cx| {
-            let ip = IpAddr::V4(Ipv4Addr::new(127, 0, 0, 1));
-            let ports = peek_ports(ip).await?;
+            // Bind to 0.0.0.0 to ensure the kernel listens on all interfaces (localhost + WSL vNIC)
+            let bind_ip = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
+            // Connect via 127.0.0.1 (localhost) which Windows forwards to WSL
+            let connect_ip = "127.0.0.1".to_string();
+
+            let ports = peek_ports(bind_ip).await?;
             log::info!("WSL kernel: picked ports: {:?}", ports);
 
             let connection_info = ConnectionInfo {
                 transport: Transport::TCP,
-                ip: ip.to_string(),
+                ip: bind_ip.to_string(),
                 stdin_port: ports[0],
                 control_port: ports[1],
                 hb_port: ports[2],
@@ -193,13 +197,16 @@ impl WslRunningKernel {
 
             let session_id = Uuid::new_v4().to_string();
 
+            let mut client_connection_info = connection_info.clone();
+            client_connection_info.ip = connect_ip;
+
             let mut iopub_socket =
-                runtimelib::create_client_iopub_connection(&connection_info, "", &session_id)
+                runtimelib::create_client_iopub_connection(&client_connection_info, "", &session_id)
                     .await?;
             let mut shell_socket =
-                runtimelib::create_client_shell_connection(&connection_info, &session_id).await?;
+                runtimelib::create_client_shell_connection(&client_connection_info, &session_id).await?;
             let mut control_socket =
-                runtimelib::create_client_control_connection(&connection_info, &session_id).await?;
+                runtimelib::create_client_control_connection(&client_connection_info, &session_id).await?;
 
             let (request_tx, mut request_rx) =
                 futures::channel::mpsc::channel::<JupyterMessage>(100);
