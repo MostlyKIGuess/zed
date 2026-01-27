@@ -175,10 +175,7 @@ impl ReplStore {
                 .collect::<Vec<_>>();
             
             if let Ok(wsl_specs) = wsl_kernel_specifications.await {
-                log::info!("ReplStore: found {} WSL kernels", wsl_specs.len());
                 all_specs.extend(wsl_specs);
-            } else {
-                log::warn!("ReplStore: wsl_kernel_specifications failed");
             }
 
             if let Some(remote_task) = remote_kernel_specifications

@@ -414,6 +414,26 @@ impl Drop for WslRunningKernel {
     }
 }
 
+#[derive(serde::Deserialize)]
+struct LocalKernelSpecsResponse {
+    kernelspecs: std::collections::HashMap<String, LocalKernelSpec>,
+}
+
+#[derive(serde::Deserialize)]
+struct LocalKernelSpec {
+    spec: LocalKernelSpecContent,
+}
+
+#[derive(serde::Deserialize)]
+struct LocalKernelSpecContent {
+    argv: Vec<String>,
+    display_name: String,
+    language: String,
+    interrupt_mode: Option<String>,
+    env: Option<std::collections::HashMap<String, String>>,
+    metadata: Option<serde_json::Value>,
+}
+
 pub async fn wsl_kernel_specifications(
     background_executor: BackgroundExecutor,
 ) -> Result<Vec<KernelSpecification>> {
@@ -473,22 +493,26 @@ pub async fn wsl_kernel_specifications(
                 if output.status.success() {
                     let json_str = String::from_utf8_lossy(&output.stdout);
                     if let Ok(specs_response) =
-                        serde_json::from_str::<KernelSpecsResponse>(&json_str)
+                        serde_json::from_str::<LocalKernelSpecsResponse>(&json_str)
                     {
-                        log::info!("WSL kernel: found kernels for {}: {:?}", distro, specs_response.kernelspecs.keys());
                         return specs_response
                             .kernelspecs
                             .into_iter()
                             .map(|(name, spec)| {
                                 KernelSpecification::WslRemote(WslKernelSpecification {
                                     name,
-                                    kernelspec: spec.spec,
+                                    kernelspec: jupyter_protocol::JupyterKernelspec {
+                                        argv: spec.spec.argv,
+                                        display_name: spec.spec.display_name,
+                                        language: spec.spec.language,
+                                        interrupt_mode: spec.spec.interrupt_mode,
+                                        env: spec.spec.env,
+                                        metadata: spec.spec.metadata,
+                                    },
                                     distro: distro.clone(),
                                 })
                             })
                             .collect::<Vec<_>>();
-                    } else {
-                         log::warn!("WSL kernel: failed to parse json for {}: {}", distro, json_str);
                     }
                 } else {
                     log::warn!("WSL kernel: jupyter kernelspec list failed for {}. Status: {:?}, Stderr: {}", distro, output.status, String::from_utf8_lossy(&output.stderr));
@@ -507,7 +531,5 @@ pub async fn wsl_kernel_specifications(
         .flatten()
         .collect();
     
-    log::info!("WSL kernel: total specs found: {}", specs.len());
-
     Ok(specs)
 }
