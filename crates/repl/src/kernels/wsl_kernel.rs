@@ -475,6 +475,7 @@ pub async fn wsl_kernel_specifications(
                     if let Ok(specs_response) =
                         serde_json::from_str::<KernelSpecsResponse>(&json_str)
                     {
+                        log::info!("WSL kernel: found kernels for {}: {:?}", distro, specs_response.kernelspecs.keys());
                         return specs_response
                             .kernelspecs
                             .into_iter()
@@ -486,8 +487,14 @@ pub async fn wsl_kernel_specifications(
                                 })
                             })
                             .collect::<Vec<_>>();
+                    } else {
+                         log::warn!("WSL kernel: failed to parse json for {}: {}", distro, json_str);
                     }
+                } else {
+                    log::warn!("WSL kernel: jupyter kernelspec list failed for {}. Status: {:?}, Stderr: {}", distro, output.status, String::from_utf8_lossy(&output.stderr));
                 }
+            } else {
+                 log::warn!("WSL kernel: failed to run wsl command for {}", distro);
             }
 
             Vec::new()
@@ -499,6 +506,8 @@ pub async fn wsl_kernel_specifications(
         .into_iter()
         .flatten()
         .collect();
+    
+    log::info!("WSL kernel: total specs found: {}", specs.len());
 
     Ok(specs)
 }
