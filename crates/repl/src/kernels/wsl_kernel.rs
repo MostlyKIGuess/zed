@@ -206,6 +206,7 @@ impl WslRunningKernel {
                 cmd.arg("--cd").arg(wd);
             }
 
+            // Build the command to run inside WSL
             // We use bash -lc to run in a login shell for proper environment setup
             let mut kernel_args: Vec<String> = Vec::new();
 
@@ -226,18 +227,47 @@ impl WslRunningKernel {
                 }
             }
 
-            // shell command string - escape single quotes in args
-            let shell_command = kernel_args
-                .iter()
-                .map(|arg| {
-                    if arg.contains(' ') || arg.contains('\'') || arg.contains('"') {
-                        format!("'{}'", arg.replace('\'', "'\\''"))
-                    } else {
-                        arg.clone()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(" ");
+            // If the first command is just "python", "python3", or a relative path,
+            // we need to ensure it's found in the environment.
+            // using a shell wrapper that activates venv if present or uses 'which' to find python.
+            let needs_python_resolution = kernel_args.first().map_or(false, |arg| {
+                let cmd = arg.split_whitespace().next().unwrap_or(arg);
+                cmd == "python" || cmd == "python3" || !cmd.starts_with('/')
+            });
+
+            let shell_command = if needs_python_resolution {
+                // Wrap the command to handle Python resolution:
+                // 1. If there's a .venv in the working directory, activate it
+                // 2. Otherwise, try to use python3 or python from PATH
+                let args_string = kernel_args
+                    .iter()
+                    .map(|arg| {
+                        if arg.contains(' ') || arg.contains('\'') || arg.contains('"') {
+                            format!("'{}'", arg.replace('\'', "'\\''"))
+                        } else {
+                            arg.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ");
+
+                format!(
+                    "if [ -f .venv/bin/activate ]; then source .venv/bin/activate; fi; exec {}",
+                    args_string
+                )
+            } else {
+                kernel_args
+                    .iter()
+                    .map(|arg| {
+                        if arg.contains(' ') || arg.contains('\'') || arg.contains('"') {
+                            format!("'{}'", arg.replace('\'', "'\\''"))
+                        } else {
+                            arg.clone()
+                        }
+                    })
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            };
 
             log::info!("WSL kernel: shell command: {}", shell_command);
 
