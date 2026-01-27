@@ -123,6 +123,10 @@ impl WslRunningKernel {
                 anyhow::bail!("Failed to convert path to WSL path: {:?}", output);
             }
             let wsl_connection_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            log::info!(
+                "WSL kernel: resolved connection path: {}",
+                wsl_connection_path
+            );
 
             // Construct the kernel command
             // The kernel spec argv might have absolute paths valid INSIDE WSL.
@@ -170,7 +174,12 @@ impl WslRunningKernel {
                 cmd.arg("--cd").arg(wd);
             }
 
-            cmd.arg("--exec");
+            // `exec "$@"` executes the arguments passed after `--`.
+            cmd.arg("bash")
+                .arg("-l")
+                .arg("-c")
+                .arg("exec \"$@\"")
+                .arg("--");
 
             if let Some(env) = &kernel_specification.kernelspec.env {
                 cmd.arg("env");
@@ -200,13 +209,18 @@ impl WslRunningKernel {
             let mut client_connection_info = connection_info.clone();
             client_connection_info.ip = connect_ip;
 
-            let mut iopub_socket =
-                runtimelib::create_client_iopub_connection(&client_connection_info, "", &session_id)
-                    .await?;
+            let mut iopub_socket = runtimelib::create_client_iopub_connection(
+                &client_connection_info,
+                "",
+                &session_id,
+            )
+            .await?;
             let mut shell_socket =
-                runtimelib::create_client_shell_connection(&client_connection_info, &session_id).await?;
+                runtimelib::create_client_shell_connection(&client_connection_info, &session_id)
+                    .await?;
             let mut control_socket =
-                runtimelib::create_client_control_connection(&client_connection_info, &session_id).await?;
+                runtimelib::create_client_control_connection(&client_connection_info, &session_id)
+                    .await?;
 
             let (request_tx, mut request_rx) =
                 futures::channel::mpsc::channel::<JupyterMessage>(100);
