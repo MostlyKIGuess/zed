@@ -501,7 +501,7 @@ pub async fn wsl_kernel_specifications(
         })
     });
 
-    let specs = futures::future::join_all(tasks)
+    let specs: Vec<_> = futures::future::join_all(tasks)
         .await
         .into_iter()
         .flatten()
