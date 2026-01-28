@@ -160,7 +160,8 @@ pub fn python_env_kernel_specifications(
         python_language,
         cx,
     );
-    let _worktree_root_path = project
+    #[allow(unused)]
+    let worktree_root_path: Option<std::sync::Arc<std::path::Path>> = project
         .read(cx)
         .worktree_for_id(worktree_id, cx)
         .map(|w| w.read(cx).abs_path().clone());
@@ -263,18 +264,20 @@ pub fn python_env_kernel_specifications(
         #[cfg(target_os = "windows")]
         if kernel_specs.is_empty() && !is_remote {
             if let Some(root_path) = worktree_root_path {
-                let root_path_str = root_path.to_string_lossy();
+                let root_path_str: std::borrow::Cow<str> = root_path.to_string_lossy();
                 let (distro, internal_path) = if root_path_str.starts_with(r"\\wsl$\") {
                     let path_without_prefix = &root_path_str[r"\\wsl$\".len()..];
                     if let Some((distro, path)) = path_without_prefix.split_once('\\') {
-                        (Some(distro), Some(format!("/{}", path.replace('\\', "/"))))
+                        let replaced_path: String = path.replace('\\', "/");
+                        (Some(distro), Some(format!("/{}", replaced_path)))
                     } else {
                         (Some(path_without_prefix), Some("/".to_string()))
                     }
                 } else if root_path_str.starts_with(r"\\wsl.localhost\") {
                     let path_without_prefix = &root_path_str[r"\\wsl.localhost\".len()..];
                     if let Some((distro, path)) = path_without_prefix.split_once('\\') {
-                        (Some(distro), Some(format!("/{}", path.replace('\\', "/"))))
+                        let replaced_path: String = path.replace('\\', "/");
+                        (Some(distro), Some(format!("/{}", replaced_path)))
                     } else {
                         (Some(path_without_prefix), Some("/".to_string()))
                     }
