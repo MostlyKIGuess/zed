@@ -188,17 +188,22 @@ impl WslRunningKernel {
             let wd_output = wslpath_wd_cmd.output().await;
             let wsl_working_directory = if let Ok(output) = wd_output {
                 if output.status.success() {
-                    let wd = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    log::info!("WSL kernel: converted working directory to: {}", wd);
-                    Some(wd)
+                    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
                 } else {
-                    log::warn!("WSL kernel: wslpath conversion failed with status: {:?}", output.status);
                     None
                 }
             } else {
-                log::warn!("WSL kernel: wslpath conversion command failed");
                 None
             };
+            log::info!(
+                "WSL kernel: converted working directory to: {:?}",
+                wsl_working_directory
+            );
+
+            // If we couldn't convert the working directory or it's a temp directory,
+            // and the kernel spec uses a relative path (like .venv/bin/python),
+            // we need to handle this better. For now, let's use the converted path
+            // if available, otherwise we'll rely on WSL's default home directory.
 
             let mut cmd = util::command::new_smol_command("wsl");
             cmd.arg("-d").arg(&kernel_specification.distro);
@@ -240,17 +245,17 @@ impl WslRunningKernel {
             let first_cmd = kernel_args.first().map(|arg| {
                 arg.split_whitespace().next().unwrap_or(arg)
             });
-            
+
             let needs_python_resolution = first_cmd.map_or(false, |cmd| {
                 cmd == "python" || cmd == "python3" || !cmd.starts_with('/')
             });
 
             let shell_command = if needs_python_resolution {
                 // Build a robust Python resolution command with better debugging
-                // 1. Check for .venv/bin/python or .venv/bin/python3
+                // 1. Check for .venv/bin/python or .venv/bin/python3 in working directory
                 // 2. Fall back to system python3 or python
                 let rest_args: Vec<String> = kernel_args.iter().skip(1).cloned().collect();
-                let rest_string = rest_args
+                let _rest_string = rest_args
                     .iter()
                     .map(|arg| {
                         if arg.contains(' ') || arg.contains('\'') || arg.contains('"') {
@@ -262,32 +267,46 @@ impl WslRunningKernel {
                     .collect::<Vec<_>>()
                     .join(" ");
 
+                // If we have a working directory, cd to it first
+                let cd_command = if let Some(wd) = wsl_working_directory.as_ref() {
+                    format!("cd '{}' && ", wd.replace('\'', "'\\''"))
+                } else {
+                    String::new()
+                };
+
                 format!(
                     "set -e; \
                      PYTHON_CMD=''; \
+                     {} \
                      echo \"Working directory: $(pwd)\" >&2; \
                      echo \"Checking for Python...\" >&2; \
+                     echo \"Looking for .venv in current directory...\" >&2; \
                      if [ -x .venv/bin/python ]; then \
-                       PYTHON_CMD='.venv/bin/python'; \
-                       echo \"Found: $PYTHON_CMD\" >&2; \
-                     elif [ -x .venv/bin/python3 ]; then \
-                       PYTHON_CMD='.venv/bin/python3'; \
-                       echo \"Found: $PYTHON_CMD\" >&2; \
-                     elif command -v python3 >/dev/null 2>&1; then \
-                       PYTHON_CMD=$(command -v python3); \
-                       echo \"Found: $PYTHON_CMD\" >&2; \
-                     elif command -v python >/dev/null 2>&1; then \
-                       PYTHON_CMD=$(command -v python); \
-                       echo \"Found: $PYTHON_CMD\" >&2; \
-                     else \
-                       echo 'Error: Python not found in .venv or PATH' >&2; \
-                       echo 'Contents of current directory:' >&2; \
-                       ls -la >&2; \
-                       exit 127; \
-                     fi; \
-                     echo \"Executing: $PYTHON_CMD {}\" >&2; \
-                     exec \"$PYTHON_CMD\" {}",
-                    rest_string, rest_string
+                        PYTHON_CMD='.venv/bin/python'; \
+                        echo \"Found: $PYTHON_CMD\" >&2; \
+                      elif [ -x .venv/bin/python3 ]; then \
+                        PYTHON_CMD='.venv/bin/python3'; \
+                        echo \"Found: $PYTHON_CMD\" >&2; \
+                      fi; \
+                      if [ -z \"$PYTHON_CMD\" ]; then \
+                        echo \"Not found in .venv, checking system PATH...\" >&2; \
+                        if command -v python3 >/dev/null 2>&1; then \
+                          PYTHON_CMD=$(command -v python3); \
+                          echo \"Found: $PYTHON_CMD\" >&2; \
+                        elif command -v python >/dev/null 2>&1; then \
+                          PYTHON_CMD=$(command -v python); \
+                          echo \"Found: $PYTHON_CMD\" >&2; \
+                        else \
+                          echo 'Error: Python not found in .venv or PATH' >&2; \
+                          echo 'Contents of current directory:' >&2; \
+                          ls -la >&2; \
+                          echo 'PATH:' \"$PATH\" >&2; \
+                          exit 127; \
+                        fi; \
+                      fi; \
+                     echo \"Executing: $PYTHON_CMD -m ipykernel_launcher -f '{}'\" >&2; \
+                     exec \"$PYTHON_CMD\" -m ipykernel_launcher -f '{}'",
+                    cd_command, wsl_connection_path, wsl_connection_path
                 )
             } else {
                 // Command has absolute path, use as-is

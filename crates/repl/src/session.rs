@@ -247,11 +247,34 @@ impl Session {
     fn start_kernel(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let kernel_language = self.kernel_specification.language();
         let entity_id = self.editor.entity_id();
-        let working_directory = self
-            .editor
-            .upgrade()
-            .and_then(|editor| editor.read(cx).working_directory(cx))
-            .unwrap_or_else(temp_dir);
+
+        // For WSL Remote kernels, use project root instead of potentially temporary working directory
+        // which causes .venv/bin/python checks to fail
+        let is_wsl_remote = matches!(
+            self.kernel_specification,
+            crate::KernelSpecification::WslRemote(_)
+        );
+
+        let working_directory = if is_wsl_remote {
+            // For WSL Remote kernels, use project root instead of potentially temporary working directory
+            // which causes .venv/bin/python checks to fail
+            self.editor
+                .upgrade()
+                .and_then(|editor| editor.read(cx).project().cloned())
+                .and_then(|project| {
+                    project
+                        .read(cx)
+                        .worktrees(cx)
+                        .next()
+                        .map(|worktree| worktree.read(cx).abs_path().to_path_buf())
+                })
+                .unwrap_or_else(temp_dir)
+        } else {
+            self.editor
+                .upgrade()
+                .and_then(|editor| editor.read(cx).working_directory(cx))
+                .unwrap_or_else(temp_dir)
+        };
 
         telemetry::event!(
             "Kernel Status Changed",

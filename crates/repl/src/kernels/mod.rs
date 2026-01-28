@@ -160,7 +160,7 @@ pub fn python_env_kernel_specifications(
         python_language,
         cx,
     );
-    let worktree_root_path = project
+    let _worktree_root_path = project
         .read(cx)
         .worktree_for_id(worktree_id, cx)
         .map(|w| w.read(cx).abs_path().clone());
@@ -254,7 +254,7 @@ pub fn python_env_kernel_specifications(
                 })
             });
 
-        let mut kernel_specs: Vec<KernelSpecification> = futures::future::join_all(kernelspecs)
+        let kernel_specs: Vec<KernelSpecification> = futures::future::join_all(kernelspecs)
             .await
             .into_iter()
             .flatten()
