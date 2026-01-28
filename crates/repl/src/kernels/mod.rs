@@ -255,6 +255,7 @@ pub fn python_env_kernel_specifications(
                 })
             });
 
+        #[allow(unused_mut)]
         let mut kernel_specs: Vec<KernelSpecification> = futures::future::join_all(kernelspecs)
             .await
             .into_iter()

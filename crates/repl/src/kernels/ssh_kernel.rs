@@ -4,7 +4,6 @@ use client::proto;
 use futures::stream::SelectAll;
 use futures::{SinkExt, StreamExt, channel::mpsc};
 use gpui::{App, AppContext, Entity, Task, Window};
-use log;
 use project::Project;
 use runtimelib::{ExecutionState, JupyterMessage, JupyterMessageContent, KernelInfoReply};
 use std::path::PathBuf;
@@ -35,18 +34,8 @@ impl SshRunningKernel {
         let client = project.read(cx).client();
         let remote_client = project.read(cx).remote_client();
         let project_id_opt = project.read(cx).remote_id();
-        let is_remote = project.read(cx).is_remote();
-        let has_remote_client = remote_client.is_some();
 
         window.spawn(cx, async move |cx| {
-            if project_id_opt.is_none() {
-                log::error!(
-                    "SshRunningKernel: not connected to remote project. is_remote: {}, has_remote_client: {}",
-                    is_remote,
-                    has_remote_client
-                );
-            }
-
             let project_id =
                 project_id_opt.ok_or_else(|| anyhow::anyhow!("not connected to remote project"))?;
 
@@ -201,8 +190,7 @@ impl SshRunningKernel {
                                     })
                                     .log_err();
                             }
-                            Err(err) => {
-                                log::error!("iopub socket read error: {:?}", err);
+                            Err(_) => {
                                 break;
                             }
                         }

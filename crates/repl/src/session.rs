@@ -21,7 +21,6 @@ use editor::{
     },
     scroll::Autoscroll,
 };
-use log;
 use project::InlayId;
 
 /// Marker types
@@ -344,7 +343,6 @@ impl Session {
                         .ok();
                     }
                     Err(err) => {
-                        log::error!("Kernel failed to start: {:?}", err);
                         this.update(cx, |session, cx| {
                             session.kernel_errored(err.to_string(), cx);
                         })
@@ -780,7 +778,6 @@ impl Session {
 
                 cx.spawn_in(window, async move |this, cx| {
                     // Send shutdown request with restart flag
-                    log::debug!("restarting kernel");
                     let message: JupyterMessage = ShutdownRequest { restart: true }.into();
                     request_tx.try_send(message).ok();
 

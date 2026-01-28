@@ -11,7 +11,6 @@ use jupyter_protocol::{
     ExecutionState, JupyterMessage, JupyterMessageContent, KernelInfoReply,
     connection_info::{ConnectionInfo, Transport},
 };
-
 use log;
 use project::Fs;
 use runtimelib::dirs;
@@ -67,8 +66,6 @@ impl WslRunningKernel {
         cx: &mut App,
     ) -> Task<Result<Box<dyn RunningKernel>>> {
         window.spawn(cx, async move |cx| {
-            log::info!("WSL kernel: starting kernel setup for distro {}", kernel_specification.distro);
-
             // For WSL2, we need to get the WSL VM's IP address to connect to it
             // because WSL2 runs in a lightweight VM with its own network namespace.
             // The kernel will bind to 127.0.0.1 inside WSL, and we connect to localhost.
@@ -80,7 +77,6 @@ impl WslRunningKernel {
             let connect_ip = "127.0.0.1".to_string();
 
             let ports = peek_ports(bind_ip).await?;
-            log::info!("WSL kernel: picked ports: {:?}", ports);
 
             let connection_info = ConnectionInfo {
                 transport: Transport::TCP,
@@ -102,7 +98,6 @@ impl WslRunningKernel {
             let connection_path = runtime_dir.join(format!("kernel-zed-wsl-{entity_id}.json"));
             let content = serde_json::to_string(&connection_info)?;
             fs.atomic_write(connection_path.clone(), content).await?;
-            log::info!("WSL kernel: wrote connection file to {:?}", connection_path);
 
             // Convert connection_path to WSL path
             // yeah we can't assume this is available on WSL.
@@ -113,10 +108,6 @@ impl WslRunningKernel {
             // escaping issues or be misinterpreted. Converting to forward slashes is safer
             // and often accepted by wslpath.
             let connection_path_str = connection_path.to_string_lossy().replace('\\', "/");
-            log::info!(
-                "WSL kernel: converting connection path: {}",
-                connection_path_str
-            );
 
             wslpath_cmd
                 .arg("-d")
@@ -130,10 +121,6 @@ impl WslRunningKernel {
                 anyhow::bail!("Failed to convert path to WSL path: {:?}", output);
             }
             let wsl_connection_path = String::from_utf8_lossy(&output.stdout).trim().to_string();
-            log::info!(
-                "WSL kernel: resolved connection path: {}",
-                wsl_connection_path
-            );
 
             // Construct the kernel command
             // The kernel spec argv might have absolute paths valid INSIDE WSL.
@@ -148,8 +135,6 @@ impl WslRunningKernel {
                 kernel_specification.name
             );
 
-            // Convert working dir
-            log::info!("WSL kernel: converting working directory: {:?}", working_directory);
             let working_directory_str = working_directory.to_string_lossy().replace('\\', "/");
 
             let wsl_working_directory = if working_directory_str.starts_with('/') {
@@ -176,11 +161,6 @@ impl WslRunningKernel {
                 }
             };
 
-            log::info!(
-                "WSL kernel: converted working directory to: {:?}",
-                wsl_working_directory
-            );
-
             // If we couldn't convert the working directory or it's a temp directory,
             // and the kernel spec uses a relative path (like .venv/bin/python),
             // we need to handle this better. For now, let's use the converted path
@@ -194,10 +174,7 @@ impl WslRunningKernel {
             cmd.current_dir(std::env::temp_dir());
 
             if let Some(wd) = wsl_working_directory.as_ref() {
-                log::info!("WSL kernel: using --cd {}", wd);
                 cmd.arg("--cd").arg(wd);
-            } else {
-                log::warn!("WSL kernel: no working directory set, will use WSL default");
             }
 
             // Build the command to run inside WSL
@@ -221,8 +198,7 @@ impl WslRunningKernel {
                 }
             }
 
-            // If the first command is just "python", "python3", or a relative path,
-            // we need to ensure it's found in the environment.
+            // because first command is python/python3 we need make sure it's present in the env
             let first_cmd = kernel_args.first().map(|arg| {
                 arg.split_whitespace().next().unwrap_or(arg)
             });
@@ -232,7 +208,6 @@ impl WslRunningKernel {
             });
 
             let shell_command = if needs_python_resolution {
-                // Build a robust Python resolution command with better debugging
                 // 1. Check for .venv/bin/python or .venv/bin/python3 in working directory
                 // 2. Fall back to system python3 or python
                 let rest_args: Vec<String> = kernel_args.iter().skip(1).cloned().collect();
@@ -248,7 +223,6 @@ impl WslRunningKernel {
                     .collect::<Vec<_>>()
                     .join(" ");
 
-                // If we have a working directory, cd to it first
                 let cd_command = if let Some(wd) = wsl_working_directory.as_ref() {
                     format!("cd '{}' && ", wd.replace('\'', "'\\''"))
                 } else {
@@ -281,7 +255,6 @@ impl WslRunningKernel {
                     cd_command, rest_string, rest_string, rest_string, rest_string
                 )
             } else {
-                // Command has absolute path, use as-is
                 kernel_args
                     .iter()
                     .map(|arg| {
@@ -295,14 +268,11 @@ impl WslRunningKernel {
                     .join(" ")
             };
 
-            log::info!("WSL kernel: shell command: {}", shell_command);
-
             cmd.arg("bash")
                 .arg("-l")
                 .arg("-c")
                 .arg(&shell_command);
 
-            log::info!("WSL kernel: spawning kernel process...");
             let mut process = cmd
                 .stdout(std::process::Stdio::piped())
                 .stderr(std::process::Stdio::piped())
@@ -310,33 +280,21 @@ impl WslRunningKernel {
                 .kill_on_drop(true)
                 .spawn()
                 .context("failed to start the kernel process")?;
-            log::info!("WSL kernel: kernel process spawned successfully");
 
             let session_id = Uuid::new_v4().to_string();
 
             let mut client_connection_info = connection_info.clone();
             client_connection_info.ip = connect_ip.clone();
-            log::info!(
-                "WSL kernel: connecting to kernel at {}:{} (shell), {}:{} (iopub), {}:{} (control)",
-                connect_ip,
-                client_connection_info.shell_port,
-                connect_ip,
-                client_connection_info.iopub_port,
-                connect_ip,
-                client_connection_info.control_port
-            );
 
             // Give the kernel a moment to start and bind to ports.
-            // WSL kernel startup can be slow, especially on first run.
-            log::info!("WSL kernel: waiting for kernel to initialize...");
+            // WSL kernel startup can be slow, I am not sure if this is because of my testing environment
+            // or inherent to WSL. We can improve this later with better readiness checks.
             cx.background_executor()
                 .timer(std::time::Duration::from_secs(2))
                 .await;
 
-            // Check if the process is still running
             match process.try_status() {
                 Ok(Some(status)) => {
-                    // Process exited - try to read stderr for error details
                     let mut stderr_content = String::new();
                     if let Some(mut stderr) = process.stderr.take() {
                         use futures::AsyncReadExt;
@@ -355,9 +313,6 @@ impl WslRunningKernel {
                         }
                     }
 
-                    log::error!("WSL kernel: process stderr: {}", stderr_content);
-                    log::error!("WSL kernel: process stdout: {}", stdout_content);
-
                     anyhow::bail!(
                         "WSL kernel process exited prematurely with status: {:?}\nstderr: {}\nstdout: {}",
                         status,
@@ -365,34 +320,24 @@ impl WslRunningKernel {
                         stdout_content
                     );
                 }
-                Ok(None) => {
-                    log::info!("WSL kernel: kernel process is still running");
-                }
-                Err(e) => {
-                    log::warn!("WSL kernel: could not check process status: {:?}", e);
-                }
+                Ok(None) => {}
+                Err(_) => {}
             }
 
-            log::info!("WSL kernel: creating iopub socket...");
             let mut iopub_socket = runtimelib::create_client_iopub_connection(
                 &client_connection_info,
                 "",
                 &session_id,
             )
             .await?;
-            log::info!("WSL kernel: iopub socket created");
 
-            log::info!("WSL kernel: creating shell socket...");
             let mut shell_socket =
                 runtimelib::create_client_shell_connection(&client_connection_info, &session_id)
                     .await?;
-            log::info!("WSL kernel: shell socket created");
 
-            log::info!("WSL kernel: creating control socket...");
             let mut control_socket =
                 runtimelib::create_client_control_connection(&client_connection_info, &session_id)
                     .await?;
-            log::info!("WSL kernel: control socket created - all sockets ready");
 
             let (request_tx, mut request_rx) =
                 futures::channel::mpsc::channel::<JupyterMessage>(100);
@@ -424,10 +369,8 @@ impl WslRunningKernel {
                 let session = session.clone();
 
                 async move |cx| -> anyhow::Result<()> {
-                    log::info!("WSL kernel: iopub task started, waiting for messages...");
                     loop {
                         let message = iopub_socket.read().await?;
-                        log::debug!("WSL kernel: received iopub message: {:?}", message.content);
                         session
                             .update_in(cx, |session, window, cx| {
                                 session.route(&message, window, cx);
@@ -490,7 +433,7 @@ impl WslRunningKernel {
                 let reader = BufReader::new(stderr.unwrap());
                 let mut lines = reader.lines();
                 while let Some(Ok(line)) = lines.next().await {
-                    log::error!("kernel: {}", line);
+                    log::error!("{}", line);
                 }
             })
             .detach();
@@ -503,9 +446,7 @@ impl WslRunningKernel {
                 }
                 let reader = BufReader::new(stdout.unwrap());
                 let mut lines = reader.lines();
-                while let Some(Ok(line)) = lines.next().await {
-                    log::info!("kernel: {}", line);
-                }
+                while let Some(Ok(_line)) = lines.next().await {}
             })
             .detach();
 
@@ -527,8 +468,6 @@ impl WslRunningKernel {
 
                     while let Some((name, result)) = tasks.next().await {
                         if let Err(err) = result {
-                            log::error!("kernel: handling failed for {name}: {err:?}");
-
                             session.update(cx, |session, cx| {
                                 session.kernel_errored(
                                     format!("handling failed for {name}: {err}"),
@@ -548,7 +487,6 @@ impl WslRunningKernel {
                 let error_message = match status.await {
                     Ok(status) => {
                         if status.success() {
-                            log::info!("WSL kernel: kernel process exited successfully");
                             return;
                         }
 
@@ -559,8 +497,6 @@ impl WslRunningKernel {
                     }
                 };
 
-                log::error!("{}", error_message);
-
                 session.update(cx, |session, cx| {
                     session.kernel_errored(error_message, cx);
 
@@ -568,7 +504,6 @@ impl WslRunningKernel {
                 });
             });
 
-            log::info!("WSL kernel: kernel initialization complete, returning RunningKernel");
             anyhow::Ok(Box::new(Self {
                 process,
                 request_tx,
@@ -723,11 +658,7 @@ pub async fn wsl_kernel_specifications(
                             })
                             .collect::<Vec<_>>();
                     }
-                } else {
-                    log::warn!("WSL kernel: jupyter kernelspec list failed for {}. Status: {:?}, Stderr: {}", distro, output.status, String::from_utf8_lossy(&output.stderr));
                 }
-            } else {
-                 log::warn!("WSL kernel: failed to run wsl command for {}", distro);
             }
 
             Vec::new()
