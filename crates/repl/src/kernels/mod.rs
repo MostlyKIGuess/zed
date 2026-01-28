@@ -255,7 +255,7 @@ pub fn python_env_kernel_specifications(
                 })
             });
 
-        let kernel_specs: Vec<KernelSpecification> = futures::future::join_all(kernelspecs)
+        let mut kernel_specs: Vec<KernelSpecification> = futures::future::join_all(kernelspecs)
             .await
             .into_iter()
             .flatten()
