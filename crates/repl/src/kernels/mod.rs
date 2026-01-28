@@ -313,6 +313,36 @@ pub fn python_env_kernel_specifications(
                             kernelspec: default_kernelspec,
                             distro: distro.to_string(),
                         }));
+                    } else {
+                        let check_system = util::command::new_smol_command("wsl")
+                            .args(&["-d", distro, "command", "-v", "python3"])
+                            .output()
+                            .await;
+
+                        if check_system.is_ok() && check_system.unwrap().status.success() {
+                            let default_kernelspec = JupyterKernelspec {
+                                argv: vec![
+                                    "python3".to_string(),
+                                    "-m".to_string(),
+                                    "ipykernel_launcher".to_string(),
+                                    "-f".to_string(),
+                                    "{connection_file}".to_string(),
+                                ],
+                                display_name: format!("WSL: {} (System)", distro),
+                                language: "python".to_string(),
+                                interrupt_mode: None,
+                                metadata: None,
+                                env: None,
+                            };
+
+                            kernel_specs.push(KernelSpecification::WslRemote(
+                                WslKernelSpecification {
+                                    name: format!("WSL: {} (System)", distro),
+                                    kernelspec: default_kernelspec,
+                                    distro: distro.to_string(),
+                                },
+                            ));
+                        }
                     }
                 }
             }
