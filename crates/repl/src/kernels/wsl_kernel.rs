@@ -228,6 +228,7 @@ impl WslRunningKernel {
                 } else {
                     String::new()
                 };
+                // TODO: find a better way to debug missing python issues in WSL
 
                 format!(
                     "set -e; \
