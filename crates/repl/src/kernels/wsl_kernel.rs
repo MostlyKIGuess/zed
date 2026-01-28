@@ -235,7 +235,7 @@ impl WslRunningKernel {
                 // 1. Check for .venv/bin/python or .venv/bin/python3 in working directory
                 // 2. Fall back to system python3 or python
                 let rest_args: Vec<String> = kernel_args.iter().skip(1).cloned().collect();
-                let _rest_string = rest_args
+                let rest_string = rest_args
                     .iter()
                     .map(|arg| {
                         if arg.contains(' ') || arg.contains('\'') || arg.contains('"') {
@@ -256,37 +256,28 @@ impl WslRunningKernel {
 
                 format!(
                     "set -e; \
-                     PYTHON_CMD=''; \
                      {} \
                      echo \"Working directory: $(pwd)\" >&2; \
-                     echo \"Checking for Python...\" >&2; \
-                     echo \"Looking for .venv in current directory...\" >&2; \
                      if [ -x .venv/bin/python ]; then \
-                        PYTHON_CMD='.venv/bin/python'; \
-                        echo \"Found: $PYTHON_CMD\" >&2; \
-                      elif [ -x .venv/bin/python3 ]; then \
-                        PYTHON_CMD='.venv/bin/python3'; \
-                        echo \"Found: $PYTHON_CMD\" >&2; \
-                      fi; \
-                      if [ -z \"$PYTHON_CMD\" ]; then \
-                        echo \"Not found in .venv, checking system PATH...\" >&2; \
-                        if command -v python3 >/dev/null 2>&1; then \
-                          PYTHON_CMD=$(command -v python3); \
-                          echo \"Found: $PYTHON_CMD\" >&2; \
-                        elif command -v python >/dev/null 2>&1; then \
-                          PYTHON_CMD=$(command -v python); \
-                          echo \"Found: $PYTHON_CMD\" >&2; \
-                        else \
-                          echo 'Error: Python not found in .venv or PATH' >&2; \
-                          echo 'Contents of current directory:' >&2; \
-                          ls -la >&2; \
-                          echo 'PATH:' \"$PATH\" >&2; \
-                          exit 127; \
-                        fi; \
-                      fi; \
-                     echo \"Executing: $PYTHON_CMD -m ipykernel_launcher -f '{}'\" >&2; \
-                     exec \"$PYTHON_CMD\" -m ipykernel_launcher -f '{}'",
-                    cd_command, wsl_connection_path, wsl_connection_path
+                       echo \"Found .venv/bin/python\" >&2; \
+                       exec .venv/bin/python {}; \
+                     elif [ -x .venv/bin/python3 ]; then \
+                       echo \"Found .venv/bin/python3\" >&2; \
+                       exec .venv/bin/python3 {}; \
+                     elif command -v python3 >/dev/null 2>&1; then \
+                       echo \"Found system python3\" >&2; \
+                       exec python3 {}; \
+                     elif command -v python >/dev/null 2>&1; then \
+                       echo \"Found system python\" >&2; \
+                       exec python {}; \
+                     else \
+                       echo 'Error: Python not found in .venv or PATH' >&2; \
+                       echo 'Contents of current directory:' >&2; \
+                       ls -la >&2; \
+                       echo 'PATH:' \"$PATH\" >&2; \
+                       exit 127; \
+                     fi",
+                    cd_command, rest_string, rest_string, rest_string, rest_string
                 )
             } else {
                 // Command has absolute path, use as-is
