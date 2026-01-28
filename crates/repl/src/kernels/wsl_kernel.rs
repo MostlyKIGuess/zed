@@ -74,35 +74,9 @@ impl WslRunningKernel {
             // The kernel will bind to 0.0.0.0 inside WSL, and we connect to the VM's IP.
             let bind_ip = IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0));
 
-            let connect_ip = {
-                let mut wsl_ip_cmd = util::command::new_smol_command("wsl");
-                wsl_ip_cmd
-                    .arg("-d")
-                    .arg(&kernel_specification.distro)
-                    .arg("hostname")
-                    .arg("-I");
-
-                let output = wsl_ip_cmd.output().await;
-                if let Ok(output) = output {
-                    if output.status.success() {
-                        let ip_str = String::from_utf8_lossy(&output.stdout);
-                        // just take the first one from hostname
-                        if let Some(ip) = ip_str.split_whitespace().next() {
-                            log::info!("WSL kernel: using WSL VM IP address: {}", ip);
-                            ip.to_string()
-                        } else {
-                            log::warn!("WSL kernel: could not parse WSL IP, falling back to 127.0.0.1");
-                            "127.0.0.1".to_string()
-                        }
-                    } else {
-                        log::warn!("WSL kernel: hostname -I failed, falling back to 127.0.0.1");
-                        "127.0.0.1".to_string()
-                    }
-                } else {
-                    log::warn!("WSL kernel: could not get WSL IP, falling back to 127.0.0.1");
-                    "127.0.0.1".to_string()
-                }
-            };
+            // Use 127.0.0.1 and rely on WSL 2 localhost forwarding.
+            // This avoids issues where the VM IP is unreachable or binding fails on Windows.
+            let connect_ip = "127.0.0.1".to_string();
 
             let ports = peek_ports(bind_ip).await?;
             log::info!("WSL kernel: picked ports: {:?}", ports);
@@ -175,26 +149,32 @@ impl WslRunningKernel {
 
             // Convert working dir
             log::info!("WSL kernel: converting working directory: {:?}", working_directory);
-            let mut wslpath_wd_cmd = util::command::new_smol_command("wsl");
             let working_directory_str = working_directory.to_string_lossy().replace('\\', "/");
 
-            wslpath_wd_cmd
-                .arg("-d")
-                .arg(&kernel_specification.distro)
-                .arg("wslpath")
-                .arg("-u")
-                .arg(&working_directory_str);
+            let wsl_working_directory = if working_directory_str.starts_with('/') {
+                // If path starts with /, assume it is already a WSL path (e.g. /home/user)
+                Some(working_directory_str)
+            } else {
+                let mut wslpath_wd_cmd = util::command::new_smol_command("wsl");
+                wslpath_wd_cmd
+                    .arg("-d")
+                    .arg(&kernel_specification.distro)
+                    .arg("wslpath")
+                    .arg("-u")
+                    .arg(&working_directory_str);
 
-            let wd_output = wslpath_wd_cmd.output().await;
-            let wsl_working_directory = if let Ok(output) = wd_output {
-                if output.status.success() {
-                    Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+                let wd_output = wslpath_wd_cmd.output().await;
+                if let Ok(output) = wd_output {
+                    if output.status.success() {
+                        Some(String::from_utf8_lossy(&output.stdout).trim().to_string())
+                    } else {
+                        None
+                    }
                 } else {
                     None
                 }
-            } else {
-                None
             };
+
             log::info!(
                 "WSL kernel: converted working directory to: {:?}",
                 wsl_working_directory
