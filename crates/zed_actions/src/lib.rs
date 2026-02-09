@@ -729,3 +729,9 @@ pub mod preview {
         );
     }
 }
+
+pub mod notebook {
+    use gpui::actions;
+
+    actions!(notebook, [NotebookMoveDown, NotebookMoveUp,]);
+}
