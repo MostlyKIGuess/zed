@@ -59,8 +59,9 @@ pub use display_map::{
 };
 pub use edit_prediction_types::Direction;
 pub use editor_settings::{
-    CompletionDetailAlignment, CurrentLineHighlight, DocumentColorsRenderMode, EditorSettings,
-    HideMouseMode, ScrollBeyondLastLine, ScrollbarAxes, SearchSettings, ShowMinimap,
+    CompletionDetailAlignment, CurrentLineHighlight, DiffViewStyle, DocumentColorsRenderMode,
+    EditorSettings, HideMouseMode, ScrollBeyondLastLine, ScrollbarAxes, SearchSettings,
+    ShowMinimap,
 };
 pub use element::{
     CursorLayout, EditorElement, HighlightedRange, HighlightedRangeLine, PointForPosition,
@@ -77,7 +78,9 @@ pub use multi_buffer::{
     MultiBufferOffset, MultiBufferOffsetUtf16, MultiBufferSnapshot, PathKey, RowInfo, ToOffset,
     ToPoint,
 };
-pub use split::{SplitDiffFeatureFlag, SplittableEditor, ToggleLockedCursors, ToggleSplitDiff};
+pub use split::{
+    SplitDiff, SplitDiffFeatureFlag, SplittableEditor, ToggleLockedCursors, ToggleSplitDiff,
+};
 pub use split_editor_view::SplitEditorView;
 pub use text::Bias;
 
@@ -328,6 +331,7 @@ pub enum HideMouseCursorOrigin {
 
 pub fn init(cx: &mut App) {
     cx.set_global(GlobalBlameRenderer(Arc::new(())));
+    cx.set_global(breadcrumbs::RenderBreadcrumbText(render_breadcrumb_text));
 
     workspace::register_project_item::<Editor>(cx);
     workspace::FollowableViewRegistry::register::<Editor>(cx);
@@ -2066,13 +2070,7 @@ impl Editor {
             constrain_width: false,
             render: Arc::new(move |fold_id, fold_range, cx| {
                 let editor = editor.clone();
-                div()
-                    .id(fold_id)
-                    .bg(cx.theme().colors().ghost_element_background)
-                    .hover(|style| style.bg(cx.theme().colors().ghost_element_hover))
-                    .active(|style| style.bg(cx.theme().colors().ghost_element_active))
-                    .rounded_xs()
-                    .size_full()
+                FoldPlaceholder::fold_element(fold_id, cx)
                     .cursor_pointer()
                     .child("⋯")
                     .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -3105,6 +3103,24 @@ impl Editor {
 
     pub fn workspace(&self) -> Option<Entity<Workspace>> {
         self.workspace.as_ref()?.0.upgrade()
+    }
+
+    /// Detaches a task and shows an error notification in the workspace if available,
+    /// otherwise just logs the error.
+    pub fn detach_and_notify_err<R, E>(
+        &self,
+        task: Task<Result<R, E>>,
+        window: &mut Window,
+        cx: &mut App,
+    ) where
+        E: std::fmt::Debug + std::fmt::Display + 'static,
+        R: 'static,
+    {
+        if let Some(workspace) = self.workspace() {
+            task.detach_and_notify_err(workspace.downgrade(), window, cx);
+        } else {
+            task.detach_and_log_err(cx);
+        }
     }
 
     /// Returns the workspace serialization ID if this editor should be serialized.
@@ -7582,6 +7598,7 @@ impl Editor {
                 constrain_width: false,
                 merge_adjacent: false,
                 type_tag: Some(type_id),
+                collapsed_text: None,
             };
             let creases = new_newlines
                 .into_iter()
@@ -11462,8 +11479,8 @@ impl Editor {
         let Some(project) = self.project.clone() else {
             return;
         };
-        self.reload(project, window, cx)
-            .detach_and_notify_err(window, cx);
+        let task = self.reload(project, window, cx);
+        self.detach_and_notify_err(task, window, cx);
     }
 
     pub fn restore_file(

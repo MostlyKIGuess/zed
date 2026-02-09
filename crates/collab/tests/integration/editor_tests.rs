@@ -19,11 +19,12 @@ use fs::Fs;
 use futures::{SinkExt, StreamExt, channel::mpsc, lock::Mutex};
 use git::repository::repo_path;
 use gpui::{
-    App, Rgba, SharedString, TestAppContext, UpdateGlobal, VisualContext, VisualTestContext,
+    App, AppContext as _, Entity, Rgba, SharedString, TestAppContext, UpdateGlobal, VisualContext,
+    VisualTestContext,
 };
 use indoc::indoc;
 use language::{FakeLspAdapter, language_settings::language_settings, rust_lang};
-use lsp::LSP_REQUEST_TIMEOUT;
+use lsp::DEFAULT_LSP_REQUEST_TIMEOUT;
 use multi_buffer::{AnchorRangeExt as _, MultiBufferRow};
 use pretty_assertions::assert_eq;
 use project::{
@@ -51,7 +52,7 @@ use std::{
 };
 use text::Point;
 use util::{path, rel_path::rel_path, uri};
-use workspace::{CloseIntent, Workspace};
+use workspace::{CloseIntent, MultiWorkspace, Workspace};
 
 #[gpui::test(iterations = 10)]
 async fn test_host_disconnect(
@@ -95,34 +96,46 @@ async fn test_host_disconnect(
 
     assert!(worktree_a.read_with(cx_a, |tree, _| tree.has_update_observer()));
 
-    let workspace_b = cx_b.add_window(|window, cx| {
-        Workspace::new(
-            None,
-            project_b.clone(),
-            client_b.app_state.clone(),
-            window,
-            cx,
-        )
+    let window_b = cx_b.add_window(|window, cx| {
+        let workspace = cx.new(|cx| {
+            Workspace::new(
+                None,
+                project_b.clone(),
+                client_b.app_state.clone(),
+                window,
+                cx,
+            )
+        });
+        MultiWorkspace::new(workspace, cx)
     });
-    let cx_b = &mut VisualTestContext::from_window(*workspace_b, cx_b);
-    let workspace_b_view = workspace_b.root(cx_b).unwrap();
+    let cx_b = &mut VisualTestContext::from_window(*window_b, cx_b);
+    let workspace_b = window_b
+        .root(cx_b)
+        .unwrap()
+        .read_with(cx_b, |multi_workspace, _| {
+            multi_workspace.workspace().clone()
+        });
 
-    let editor_b = workspace_b
-        .update(cx_b, |workspace, window, cx| {
+    let editor_b: Entity<Editor> = workspace_b
+        .update_in(cx_b, |workspace, window, cx| {
             workspace.open_path((worktree_id, rel_path("b.txt")), None, true, window, cx)
         })
-        .unwrap()
         .await
         .unwrap()
         .downcast::<Editor>()
         .unwrap();
 
     //TODO: focus
-    assert!(cx_b.update_window_entity(&editor_b, |editor, window, _| editor.is_focused(window)));
-    editor_b.update_in(cx_b, |editor, window, cx| editor.insert("X", window, cx));
+    assert!(
+        cx_b.update_window_entity(&editor_b, |editor: &mut Editor, window, _| editor
+            .is_focused(window))
+    );
+    editor_b.update_in(cx_b, |editor: &mut Editor, window, cx| {
+        editor.insert("X", window, cx)
+    });
 
     cx_b.update(|_, cx| {
-        assert!(workspace_b_view.read(cx).is_edited());
+        assert!(workspace_b.read(cx).is_edited());
     });
 
     // Drop client A's connection. Collaborators should disappear and the project should not be shown as shared.
@@ -140,19 +153,16 @@ async fn test_host_disconnect(
     assert!(worktree_a.read_with(cx_a, |tree, _| !tree.has_update_observer()));
 
     // Ensure client B's edited state is reset and that the whole window is blurred.
-    workspace_b
-        .update(cx_b, |workspace, _, cx| {
-            assert!(workspace.active_modal::<DisconnectedOverlay>(cx).is_some());
-            assert!(!workspace.is_edited());
-        })
-        .unwrap();
+    workspace_b.update(cx_b, |workspace, cx| {
+        assert!(workspace.active_modal::<DisconnectedOverlay>(cx).is_some());
+        assert!(!workspace.is_edited());
+    });
 
     // Ensure client B is not prompted to save edits when closing window after disconnecting.
-    let can_close = workspace_b
-        .update(cx_b, |workspace, window, cx| {
+    let can_close: bool = workspace_b
+        .update_in(cx_b, |workspace, window, cx| {
             workspace.prepare_to_close(CloseIntent::Quit, window, cx)
         })
-        .unwrap()
         .await
         .unwrap();
     assert!(can_close);
@@ -1255,7 +1265,7 @@ async fn test_slow_lsp_server(cx_a: &mut TestAppContext, cx_b: &mut TestAppConte
     cx_a.run_until_parked();
     cx_b.run_until_parked();
 
-    let long_request_time = LSP_REQUEST_TIMEOUT / 2;
+    let long_request_time = DEFAULT_LSP_REQUEST_TIMEOUT / 2;
     let (request_started_tx, mut request_started_rx) = mpsc::unbounded();
     let requests_started = Arc::new(AtomicUsize::new(0));
     let requests_completed = Arc::new(AtomicUsize::new(0));
@@ -1362,8 +1372,8 @@ async fn test_slow_lsp_server(cx_a: &mut TestAppContext, cx_b: &mut TestAppConte
     );
     assert_eq!(
         requests_completed.load(atomic::Ordering::Acquire),
-        3,
-        "After enough time, all 3 LSP requests should have been served by the language server"
+        1,
+        "After enough time, a single, deduplicated, LSP request should have been served by the language server"
     );
     let resulting_lens_actions = editor_b
         .update(cx_b, |editor, cx| {
@@ -1382,7 +1392,7 @@ async fn test_slow_lsp_server(cx_a: &mut TestAppContext, cx_b: &mut TestAppConte
     );
     assert_eq!(
         resulting_lens_actions.first().unwrap().lsp_action.title(),
-        "LSP Command 3",
+        "LSP Command 1",
         "Only the final code lens action should be in the data"
     )
 }
@@ -2164,7 +2174,7 @@ async fn test_mutual_editor_inlay_hint_cache_update(
 
     let after_special_edit_for_refresh = edits_made.fetch_add(1, atomic::Ordering::Release) + 1;
     fake_language_server
-        .request::<lsp::request::InlayHintRefreshRequest>(())
+        .request::<lsp::request::InlayHintRefreshRequest>((), DEFAULT_LSP_REQUEST_TIMEOUT)
         .await
         .into_response()
         .expect("inlay refresh request failed");
@@ -2375,7 +2385,7 @@ async fn test_inlay_hint_refresh_is_forwarded(
 
     other_hints.fetch_or(true, atomic::Ordering::Release);
     fake_language_server
-        .request::<lsp::request::InlayHintRefreshRequest>(())
+        .request::<lsp::request::InlayHintRefreshRequest>((), DEFAULT_LSP_REQUEST_TIMEOUT)
         .await
         .into_response()
         .expect("inlay refresh request failed");
@@ -3414,7 +3424,7 @@ async fn test_lsp_pull_diagnostics(
     }
 
     fake_language_server
-        .request::<lsp::request::WorkspaceDiagnosticRefresh>(())
+        .request::<lsp::request::WorkspaceDiagnosticRefresh>((), DEFAULT_LSP_REQUEST_TIMEOUT)
         .await
         .into_response()
         .expect("workspace diagnostics refresh request failed");
@@ -5185,7 +5195,7 @@ async fn test_semantic_token_refresh_is_forwarded(
 
     other_tokens.fetch_or(true, atomic::Ordering::Release);
     fake_language_server
-        .request::<lsp::request::SemanticTokensRefresh>(())
+        .request::<lsp::request::SemanticTokensRefresh>((), DEFAULT_LSP_REQUEST_TIMEOUT)
         .await
         .into_response()
         .expect("semantic tokens refresh request failed");
