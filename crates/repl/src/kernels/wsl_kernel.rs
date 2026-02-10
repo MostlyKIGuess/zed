@@ -1,10 +1,10 @@
 use super::{KernelSession, KernelSpecification, RunningKernel, WslKernelSpecification};
 use anyhow::{Context as _, Result};
 use futures::{
-    AsyncBufReadExt as _, SinkExt as _,
+    AsyncBufReadExt as _, FutureExt as _, StreamExt as _,
     channel::mpsc::{self},
     io::BufReader,
-    stream::{FuturesUnordered, SelectAll, StreamExt},
+    stream::FuturesUnordered,
 };
 use gpui::{App, AppContext as _, BackgroundExecutor, Entity, EntityId, Task, Window};
 use jupyter_protocol::{
@@ -326,65 +326,56 @@ impl WslRunningKernel {
                 Err(_) => {}
             }
 
-            let mut iopub_socket = runtimelib::create_client_iopub_connection(
+            let iopub_socket = runtimelib::create_client_iopub_connection(
                 &client_connection_info,
                 "",
                 &session_id,
             )
             .await?;
 
-            let mut shell_socket =
+            let shell_socket =
                 runtimelib::create_client_shell_connection(&client_connection_info, &session_id)
                     .await?;
 
-            let mut control_socket =
+            let control_socket =
                 runtimelib::create_client_control_connection(&client_connection_info, &session_id)
                     .await?;
+
+            let (mut shell_send, shell_recv) = shell_socket.split();
+            let (mut control_send, control_recv) = control_socket.split();
 
             let (request_tx, mut request_rx) =
                 futures::channel::mpsc::channel::<JupyterMessage>(100);
 
-            let (mut control_reply_tx, control_reply_rx) = futures::channel::mpsc::channel(100);
-            let (mut shell_reply_tx, shell_reply_rx) = futures::channel::mpsc::channel(100);
-
-            let mut messages_rx = SelectAll::new();
-            messages_rx.push(control_reply_rx);
-            messages_rx.push(shell_reply_rx);
-
-            cx.spawn({
+            let recv_task = cx.spawn({
                 let session = session.clone();
-
-                async move |cx| {
-                    while let Some(message) = messages_rx.next().await {
-                        session
-                            .update_in(cx, |session, window, cx| {
-                                session.route(&message, window, cx);
-                            })
-                            .ok();
-                    }
-                }
-            })
-            .detach();
-
-            // iopub task
-            let iopub_task = cx.spawn({
-                let session = session.clone();
+                let mut iopub = iopub_socket;
+                let mut shell = shell_recv;
+                let mut control = control_recv;
 
                 async move |cx| -> anyhow::Result<()> {
                     loop {
-                        let message = iopub_socket.read().await?;
-                        session
-                            .update_in(cx, |session, window, cx| {
-                                session.route(&message, window, cx);
-                            })
-                            .ok();
+                        let (channel, result) = futures::select! {
+                            msg = iopub.read().fuse() => ("iopub", msg),
+                            msg = shell.read().fuse() => ("shell", msg),
+                            msg = control.read().fuse() => ("control", msg),
+                        };
+                        match result {
+                            Ok(message) => {
+                                session
+                                    .update_in(cx, |session, window, cx| {
+                                        session.route(&message, window, cx);
+                                    })
+                                    .ok();
+                            }
+                            Err(err) => {
+                                log::warn!("kernel: error reading from {channel}: {err:?}");
+                                anyhow::bail!("{channel} recv: {err}");
+                            }
+                        }
                     }
                 }
             });
-
-            let (mut control_request_tx, mut control_request_rx) =
-                futures::channel::mpsc::channel(100);
-            let (mut shell_request_tx, mut shell_request_rx) = futures::channel::mpsc::channel(100);
 
             let routing_task = cx.background_spawn({
                 async move {
@@ -393,34 +384,12 @@ impl WslRunningKernel {
                             JupyterMessageContent::DebugRequest(_)
                             | JupyterMessageContent::InterruptRequest(_)
                             | JupyterMessageContent::ShutdownRequest(_) => {
-                                control_request_tx.send(message).await?;
+                                control_send.send(message).await?;
                             }
                             _ => {
-                                shell_request_tx.send(message).await?;
+                                shell_send.send(message).await?;
                             }
                         }
-                    }
-                    anyhow::Ok(())
-                }
-            });
-
-            let shell_task = cx.background_spawn({
-                async move {
-                    while let Some(message) = shell_request_rx.next().await {
-                        shell_socket.send(message).await.ok();
-                        let reply = shell_socket.read().await?;
-                        shell_reply_tx.send(reply).await?;
-                    }
-                    anyhow::Ok(())
-                }
-            });
-
-            let control_task = cx.background_spawn({
-                async move {
-                    while let Some(message) = control_request_rx.next().await {
-                        control_socket.send(message).await.ok();
-                        let reply = control_socket.read().await?;
-                        control_reply_tx.send(reply).await?;
                     }
                     anyhow::Ok(())
                 }
@@ -463,13 +432,11 @@ impl WslRunningKernel {
                     }
 
                     let mut tasks = FuturesUnordered::new();
-                    tasks.push(with_name("iopub task", iopub_task));
-                    tasks.push(with_name("shell task", shell_task));
-                    tasks.push(with_name("control task", control_task));
+                    tasks.push(with_name("recv task", recv_task));
                     tasks.push(with_name("routing task", routing_task));
 
                     while let Some((name, result)) = tasks.next().await {
-                        if let Err(err) = result {
+                         if let Err(err) = result {
                             session.update(cx, |session, cx| {
                                 session.kernel_errored(
                                     format!("handling failed for {name}: {err}"),
