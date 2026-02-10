@@ -40,6 +40,7 @@ use picker::Picker;
 use runtimelib::{ExecuteRequest, JupyterMessage, JupyterMessageContent};
 use ui::PopoverMenuHandle;
 use zed_actions::editor::{MoveDown, MoveUp};
+use zed_actions::notebook::{NotebookMoveDown, NotebookMoveUp};
 
 actions!(
     notebook,
@@ -64,10 +65,6 @@ actions!(
         RestartKernel,
         /// Interrupts the current execution.
         InterruptKernel,
-        /// Move to down in cells
-        NotebookMoveDown,
-        /// Move to up in cells
-        NotebookMoveUp,
     ]
 );
 
