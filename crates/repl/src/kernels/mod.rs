@@ -1,11 +1,7 @@
 mod native_kernel;
 use std::{fmt::Debug, future::Future, path::PathBuf};
 
-use futures::{
-    channel::mpsc::{self, Receiver},
-    future::Shared,
-    stream,
-};
+use futures::{channel::mpsc, future::Shared};
 use gpui::{App, Entity, Task, Window};
 use language::LanguageName;
 use log;
@@ -32,8 +28,6 @@ pub trait KernelSession: Sized {
     fn route(&mut self, message: &JupyterMessage, window: &mut Window, cx: &mut Context<Self>);
     fn kernel_errored(&mut self, error_message: String, cx: &mut Context<Self>);
 }
-
-pub type JupyterMessageChannel = stream::SelectAll<Receiver<JupyterMessage>>;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KernelSpecification {
@@ -362,6 +356,7 @@ pub trait RunningKernel: Send + Debug {
     fn kernel_info(&self) -> Option<&KernelInfoReply>;
     fn set_kernel_info(&mut self, info: KernelInfoReply);
     fn force_shutdown(&mut self, window: &mut Window, cx: &mut App) -> Task<anyhow::Result<()>>;
+    fn kill(&mut self);
 }
 
 #[derive(Debug, Clone)]

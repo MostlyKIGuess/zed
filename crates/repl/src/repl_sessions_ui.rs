@@ -78,9 +78,8 @@ pub fn init(cx: &mut App) {
                 return;
             }
 
-            cx.defer_in(window, |editor, window, cx| {
-                let workspace = Workspace::for_window(window, cx);
-                let project = workspace.map(|workspace| workspace.read(cx).project().clone());
+            cx.defer_in(window, |editor, _window, cx| {
+                let project = editor.project().cloned();
 
                 let is_local_or_ssh_remote = project
                     .as_ref()
