@@ -21,6 +21,7 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
+use util::ResultExt;
 use uuid::Uuid;
 
 // Find a set of open ports. This creates a listener with port set to 0. The listener will be closed at the end when it goes out of scope.
@@ -547,6 +548,12 @@ impl RunningKernel for WslRunningKernel {
         self._process_status_task.take();
         self.request_tx.close_channel();
         Task::ready(self.process.kill().context("killing the kernel process"))
+    }
+
+    fn kill(&mut self) {
+        self._process_status_task.take();
+        self.request_tx.close_channel();
+        self.process.kill().log_err();
     }
 }
 

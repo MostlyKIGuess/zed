@@ -285,4 +285,8 @@ impl RunningKernel for SshRunningKernel {
             Ok(())
         })
     }
+
+    fn kill(&mut self) {
+        self._ssh_tunnel_process.kill().log_err();
+    }
 }
