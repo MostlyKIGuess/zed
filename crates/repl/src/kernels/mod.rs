@@ -28,7 +28,6 @@ use runtimelib::{
 use ui::{Icon, IconName, SharedString};
 use util::rel_path::RelPath;
 
-
 pub fn start_kernel_tasks<S: KernelSession + 'static>(
     session: Entity<S>,
     iopub_socket: ClientIoPubConnection,

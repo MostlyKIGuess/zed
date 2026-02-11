@@ -1,11 +1,11 @@
-use super::{start_kernel_tasks, KernelSession, RunningKernel, SshRemoteKernelSpecification};
+use super::{KernelSession, RunningKernel, SshRemoteKernelSpecification, start_kernel_tasks};
 use anyhow::{Context as _, Result};
 use client::proto;
 
 use futures::{
+    AsyncBufReadExt as _, StreamExt as _,
     channel::mpsc::{self},
     io::BufReader,
-    AsyncBufReadExt as _, StreamExt as _,
 };
 use gpui::{App, Entity, Task, Window};
 use project::Project;

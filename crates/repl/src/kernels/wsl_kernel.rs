@@ -1,10 +1,11 @@
-use super::{start_kernel_tasks, KernelSession, KernelSpecification, RunningKernel, WslKernelSpecification};
+use super::{
+    KernelSession, KernelSpecification, RunningKernel, WslKernelSpecification, start_kernel_tasks,
+};
 use anyhow::{Context as _, Result};
 use futures::{
+    AsyncBufReadExt as _, StreamExt as _,
     channel::mpsc::{self},
     io::BufReader,
-    AsyncBufReadExt as _, StreamExt as _,
-
 };
 use gpui::{App, BackgroundExecutor, Entity, EntityId, Task, Window};
 use jupyter_protocol::{

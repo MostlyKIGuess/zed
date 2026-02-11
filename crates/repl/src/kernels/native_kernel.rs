@@ -3,7 +3,6 @@ use futures::{
     AsyncBufReadExt as _, StreamExt as _,
     channel::mpsc::{self},
     io::BufReader,
-
 };
 use gpui::{App, Entity, EntityId, Task, Window};
 use jupyter_protocol::{
@@ -22,7 +21,7 @@ use std::{
 };
 use uuid::Uuid;
 
-use super::{start_kernel_tasks, KernelSession, RunningKernel};
+use super::{KernelSession, RunningKernel, start_kernel_tasks};
 
 #[derive(Debug, Clone)]
 pub struct LocalKernelSpecification {
@@ -195,8 +194,6 @@ impl NativeRunningKernel {
                 }
             })
             .detach();
-
-
 
             let status = process.status();
 
