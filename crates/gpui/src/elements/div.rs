@@ -15,15 +15,17 @@
 //! and Tailwind-like styling that you can use to build your own custom elements. Div is
 //! constructed by combining these two systems into an all-in-one element.
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+use crate::PinchEvent;
 use crate::{
     AbsoluteLength, Action, AnyDrag, AnyElement, AnyTooltip, AnyView, App, Bounds, ClickEvent,
     DispatchPhase, Display, Element, ElementId, Entity, FocusHandle, Global, GlobalElementId,
     Hitbox, HitboxBehavior, HitboxId, InspectorElementId, IntoElement, IsZero, KeyContext,
     KeyDownEvent, KeyUpEvent, KeyboardButton, KeyboardClickEvent, LayoutId, ModifiersChangedEvent,
     MouseButton, MouseClickEvent, MouseDownEvent, MouseMoveEvent, MousePressureEvent, MouseUpEvent,
-    Overflow, ParentElement, PinchEvent, Pixels, Point, Render, ScrollWheelEvent, SharedString,
-    Size, Style, StyleRefinement, Styled, Task, TooltipId, Visibility, Window, WindowControlArea,
-    point, px, size,
+    Overflow, ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Style,
+    StyleRefinement, Styled, Task, TooltipId, Visibility, Window, WindowControlArea, point, px,
+    size,
 };
 use collections::HashMap;
 use refineable::Refineable;
@@ -355,7 +357,11 @@ impl Interactivity {
 
     /// Bind the given callback to pinch gesture events during the bubble phase.
     ///
+    /// Note: This event is only available on macOS and Wayland (Linux).
+    /// On Windows, pinch gestures are simulated as scroll wheel events with Ctrl held.
+    ///
     /// See [`Context::listener`](crate::Context::listener) to get access to a view's state from this callback.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn on_pinch(&mut self, listener: impl Fn(&PinchEvent, &mut Window, &mut App) + 'static) {
         self.pinch_listeners
             .push(Box::new(move |event, phase, hitbox, window, cx| {
@@ -367,7 +373,11 @@ impl Interactivity {
 
     /// Bind the given callback to pinch gesture events during the capture phase.
     ///
+    /// Note: This event is only available on macOS and Wayland (Linux).
+    /// On Windows, pinch gestures are simulated as scroll wheel events with Ctrl held.
+    ///
     /// See [`Context::listener`](crate::Context::listener) to get access to a view's state from this callback.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn capture_pinch(
         &mut self,
         listener: impl Fn(&PinchEvent, &mut Window, &mut App) + 'static,
@@ -937,7 +947,11 @@ pub trait InteractiveElement: Sized {
     /// Bind the given callback to pinch gesture events during the bubble phase.
     /// The fluent API equivalent to [`Interactivity::on_pinch`].
     ///
+    /// Note: This event is only available on macOS and Wayland (Linux).
+    /// On Windows, pinch gestures are simulated as scroll wheel events with Ctrl held.
+    ///
     /// See [`Context::listener`](crate::Context::listener) to get access to a view's state from this callback.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn on_pinch(mut self, listener: impl Fn(&PinchEvent, &mut Window, &mut App) + 'static) -> Self {
         self.interactivity().on_pinch(listener);
         self
@@ -946,7 +960,11 @@ pub trait InteractiveElement: Sized {
     /// Bind the given callback to pinch gesture events during the capture phase.
     /// The fluent API equivalent to [`Interactivity::capture_pinch`].
     ///
+    /// Note: This event is only available on macOS and Wayland (Linux).
+    /// On Windows, pinch gestures are simulated as scroll wheel events with Ctrl held.
+    ///
     /// See [`Context::listener`](crate::Context::listener) to get access to a view's state from this callback.
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     fn capture_pinch(
         mut self,
         listener: impl Fn(&PinchEvent, &mut Window, &mut App) + 'static,
@@ -1339,6 +1357,7 @@ pub(crate) type MouseMoveListener =
 pub(crate) type ScrollWheelListener =
     Box<dyn Fn(&ScrollWheelEvent, DispatchPhase, &Hitbox, &mut Window, &mut App) + 'static>;
 
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) type PinchListener =
     Box<dyn Fn(&PinchEvent, DispatchPhase, &Hitbox, &mut Window, &mut App) + 'static>;
 
@@ -1696,6 +1715,7 @@ pub struct Interactivity {
     pub(crate) mouse_pressure_listeners: Vec<MousePressureListener>,
     pub(crate) mouse_move_listeners: Vec<MouseMoveListener>,
     pub(crate) scroll_wheel_listeners: Vec<ScrollWheelListener>,
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) pinch_listeners: Vec<PinchListener>,
     pub(crate) key_down_listeners: Vec<KeyDownListener>,
     pub(crate) key_up_listeners: Vec<KeyUpListener>,
@@ -1900,7 +1920,8 @@ impl Interactivity {
             || !self.click_listeners.is_empty()
             || !self.aux_click_listeners.is_empty()
             || !self.scroll_wheel_listeners.is_empty()
-            || !self.pinch_listeners.is_empty()
+            || cfg!(any(target_os = "linux", target_os = "macos"))
+                && !self.pinch_listeners.is_empty()
             || self.drag_listener.is_some()
             || !self.drop_listeners.is_empty()
             || self.tooltip_builder.is_some()
@@ -2267,6 +2288,7 @@ impl Interactivity {
             })
         }
 
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         for listener in self.pinch_listeners.drain(..) {
             let hitbox = hitbox.clone();
             window.on_mouse_event(move |event: &PinchEvent, phase, window, cx| {
