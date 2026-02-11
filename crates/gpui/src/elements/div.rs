@@ -674,6 +674,16 @@ impl Interactivity {
     pub fn block_mouse_except_scroll(&mut self) {
         self.hitbox_behavior = HitboxBehavior::BlockMouseExceptScroll;
     }
+
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    fn has_pinch_listeners(&self) -> bool {
+        !self.pinch_listeners.is_empty()
+    }
+
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    fn has_pinch_listeners(&self) -> bool {
+        false
+    }
 }
 
 /// A trait for elements that want to use the standard GPUI event handlers that don't
@@ -1920,8 +1930,7 @@ impl Interactivity {
             || !self.click_listeners.is_empty()
             || !self.aux_click_listeners.is_empty()
             || !self.scroll_wheel_listeners.is_empty()
-            || cfg!(any(target_os = "linux", target_os = "macos"))
-                && !self.pinch_listeners.is_empty()
+            || self.has_pinch_listeners()
             || self.drag_listener.is_some()
             || !self.drop_listeners.is_empty()
             || self.tooltip_builder.is_some()
