@@ -18,11 +18,115 @@ mod wsl_kernel;
 pub use wsl_kernel::*;
 
 use anyhow::Result;
-use gpui::Context;
-use jupyter_protocol::JupyterKernelspec;
-use runtimelib::{ExecutionState, JupyterMessage, KernelInfoReply};
+use futures::{FutureExt, StreamExt};
+use gpui::{AppContext, AsyncWindowContext, Context};
+use jupyter_protocol::{JupyterKernelspec, JupyterMessageContent};
+use runtimelib::{
+    ClientControlConnection, ClientIoPubConnection, ClientShellConnection, ExecutionState,
+    JupyterMessage, KernelInfoReply,
+};
 use ui::{Icon, IconName, SharedString};
 use util::rel_path::RelPath;
+
+
+pub fn start_kernel_tasks<S: KernelSession + 'static>(
+    session: Entity<S>,
+    iopub_socket: ClientIoPubConnection,
+    shell_socket: ClientShellConnection,
+    control_socket: ClientControlConnection,
+    cx: &mut AsyncWindowContext,
+) -> futures::channel::mpsc::Sender<JupyterMessage> {
+    let (mut shell_send, shell_recv) = shell_socket.split();
+    let (mut control_send, control_recv) = control_socket.split();
+
+    let (request_tx, mut request_rx) = futures::channel::mpsc::channel::<JupyterMessage>(100);
+
+    let recv_task = cx.spawn({
+        let session = session.clone();
+        let mut iopub = iopub_socket;
+        let mut shell = shell_recv;
+        let mut control = control_recv;
+
+        async move |cx| -> anyhow::Result<()> {
+            loop {
+                let (channel, result) = futures::select! {
+                    msg = iopub.read().fuse() => ("iopub", msg),
+                    msg = shell.read().fuse() => ("shell", msg),
+                    msg = control.read().fuse() => ("control", msg),
+                };
+                match result {
+                    Ok(message) => {
+                        session
+                            .update_in(cx, |session, window, cx| {
+                                session.route(&message, window, cx);
+                            })
+                            .ok();
+                    }
+                    Err(
+                        ref err @ (runtimelib::RuntimeError::ParseError { .. }
+                        | runtimelib::RuntimeError::SerdeError(_)),
+                    ) => {
+                        let error_detail = format!("Kernel issue on {channel} channel\n\n{err}");
+                        log::warn!("kernel: {error_detail}");
+                        session
+                            .update_in(cx, |session, _window, cx| {
+                                session.kernel_errored(error_detail, cx);
+                                cx.notify();
+                            })
+                            .ok();
+                    }
+                    Err(err) => {
+                        log::warn!("kernel: error reading from {channel}: {err:?}");
+                        anyhow::bail!("{channel} recv: {err}");
+                    }
+                }
+            }
+        }
+    });
+
+    let routing_task = cx.background_spawn(async move {
+        while let Some(message) = request_rx.next().await {
+            match message.content {
+                JupyterMessageContent::DebugRequest(_)
+                | JupyterMessageContent::InterruptRequest(_)
+                | JupyterMessageContent::ShutdownRequest(_) => {
+                    control_send.send(message).await?;
+                }
+                _ => {
+                    shell_send.send(message).await?;
+                }
+            }
+        }
+        anyhow::Ok(())
+    });
+
+    cx.spawn({
+        async move |cx| {
+            async fn with_name(
+                name: &'static str,
+                task: Task<Result<()>>,
+            ) -> (&'static str, Result<()>) {
+                (name, task.await)
+            }
+
+            let mut tasks = futures::stream::FuturesUnordered::new();
+            tasks.push(with_name("recv task", recv_task));
+            tasks.push(with_name("routing task", routing_task));
+
+            while let Some((name, result)) = tasks.next().await {
+                if let Err(err) = result {
+                    session.update(cx, |session, cx| {
+                        session.kernel_errored(format!("handling failed for {name}: {err}"), cx);
+                        cx.notify();
+                    });
+                }
+            }
+        }
+    })
+    .detach();
+
+    request_tx
+}
 
 pub trait KernelSession: Sized {
     fn route(&mut self, message: &JupyterMessage, window: &mut Window, cx: &mut Context<Self>);

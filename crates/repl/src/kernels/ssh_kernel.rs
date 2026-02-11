@@ -1,14 +1,15 @@
-use super::{KernelSession, RunningKernel, SshRemoteKernelSpecification};
+use super::{start_kernel_tasks, KernelSession, RunningKernel, SshRemoteKernelSpecification};
 use anyhow::{Context as _, Result};
 use client::proto;
 
 use futures::{
     channel::mpsc::{self},
-    FutureExt as _, StreamExt as _,
+    io::BufReader,
+    AsyncBufReadExt as _, StreamExt as _,
 };
-use gpui::{App, AppContext, Entity, Task, Window};
+use gpui::{App, Entity, Task, Window};
 use project::Project;
-use runtimelib::{ExecutionState, JupyterMessage, JupyterMessageContent, KernelInfoReply};
+use runtimelib::{ExecutionState, JupyterMessage, KernelInfoReply};
 use std::path::PathBuf;
 use util::ResultExt;
 
@@ -95,7 +96,29 @@ impl SshRunningKernel {
             command.args(&command_template.args);
             command.envs(&command_template.env);
 
-            let ssh_tunnel_process = command.spawn().context("failed to spawn ssh tunnel")?;
+            let mut ssh_tunnel_process = command.spawn().context("failed to spawn ssh tunnel")?;
+
+            let stderr = ssh_tunnel_process.stderr.take();
+            cx.spawn(async move |_cx| {
+                if let Some(stderr) = stderr {
+                    let reader = BufReader::new(stderr);
+                    let mut lines = reader.lines();
+                    while let Some(Ok(line)) = lines.next().await {
+                        log::warn!("ssh tunnel stderr: {}", line);
+                    }
+                }
+            })
+            .detach();
+
+            let stdout = ssh_tunnel_process.stdout.take();
+            cx.spawn(async move |_cx| {
+                if let Some(stdout) = stdout {
+                    let reader = BufReader::new(stdout);
+                    let mut lines = reader.lines();
+                    while let Some(Ok(_line)) = lines.next().await {}
+                }
+            })
+            .detach();
 
             // We might or might not need this, perhaps we can just wait for a second or test it this way
             let shell_port = local_ports[0];
@@ -159,85 +182,13 @@ impl SshRunningKernel {
                     .await
                     .context("failed to create control connection")?;
 
-            let (mut shell_send, shell_recv) = shell_socket.split();
-            let (mut control_send, control_recv) = control_socket.split();
-
-            let (request_tx, mut request_rx) = mpsc::channel::<JupyterMessage>(100);
-
-            let recv_task = cx.spawn({
-                let session = session.clone();
-                let mut iopub = iopub_socket;
-                let mut shell = shell_recv;
-                let mut control = control_recv;
-
-                async move |cx| -> anyhow::Result<()> {
-                    loop {
-                        let (channel, result) = futures::select! {
-                            msg = iopub.read().fuse() => ("iopub", msg),
-                            msg = shell.read().fuse() => ("shell", msg),
-                            msg = control.read().fuse() => ("control", msg),
-                        };
-                        match result {
-                            Ok(message) => {
-                                session
-                                    .update_in(cx, |session, window, cx| {
-                                        session.route(&message, window, cx);
-                                    })
-                                    .ok();
-                            }
-                            Err(err) => {
-                                log::warn!("kernel: error reading from {channel}: {err:?}");
-                                anyhow::bail!("{channel} recv: {err}");
-                            }
-                        }
-                    }
-                }
-            });
-
-            let routing_task = cx.background_spawn(async move {
-                while let Some(message) = request_rx.next().await {
-                    match message.content {
-                        JupyterMessageContent::DebugRequest(_)
-                        | JupyterMessageContent::InterruptRequest(_)
-                        | JupyterMessageContent::ShutdownRequest(_) => {
-                            control_send.send(message).await?;
-                        }
-                        _ => {
-                            shell_send.send(message).await?;
-                        }
-                    }
-                }
-                anyhow::Ok(())
-            });
-
-            cx.spawn({
-                let session = session.clone();
-                async move |cx| {
-                    async fn with_name(
-                        name: &'static str,
-                        task: Task<anyhow::Result<()>>,
-                    ) -> (&'static str, anyhow::Result<()>) {
-                        (name, task.await)
-                    }
-
-                    let mut tasks = futures::stream::FuturesUnordered::new();
-                    tasks.push(with_name("recv task", recv_task));
-                    tasks.push(with_name("routing task", routing_task));
-
-                    while let Some((name, result)) = tasks.next().await {
-                        if let Err(err) = result {
-                            session.update(cx, |session, cx| {
-                                session.kernel_errored(
-                                    format!("handling failed for {name}: {err}"),
-                                    cx,
-                                );
-                                cx.notify();
-                            });
-                        }
-                    }
-                }
-            })
-            .detach();
+            let request_tx = start_kernel_tasks(
+                session.clone(),
+                iopub_socket,
+                shell_socket,
+                control_socket,
+                cx,
+            );
 
             Ok(Box::new(SshRunningKernel {
                 request_tx,

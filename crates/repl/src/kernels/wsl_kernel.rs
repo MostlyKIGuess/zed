@@ -1,17 +1,16 @@
-use super::{KernelSession, KernelSpecification, RunningKernel, WslKernelSpecification};
+use super::{start_kernel_tasks, KernelSession, KernelSpecification, RunningKernel, WslKernelSpecification};
 use anyhow::{Context as _, Result};
 use futures::{
-    AsyncBufReadExt as _, FutureExt as _, StreamExt as _,
     channel::mpsc::{self},
     io::BufReader,
-    stream::FuturesUnordered,
+    AsyncBufReadExt as _, StreamExt as _,
+
 };
-use gpui::{App, AppContext as _, BackgroundExecutor, Entity, EntityId, Task, Window};
+use gpui::{App, BackgroundExecutor, Entity, EntityId, Task, Window};
 use jupyter_protocol::{
-    ExecutionState, JupyterMessage, JupyterMessageContent, KernelInfoReply,
+    ExecutionState, JupyterMessage, KernelInfoReply,
     connection_info::{ConnectionInfo, Transport},
 };
-use log;
 use project::Fs;
 use runtimelib::dirs;
 use smol::net::TcpListener;
@@ -341,111 +340,32 @@ impl WslRunningKernel {
                 runtimelib::create_client_control_connection(&client_connection_info, &session_id)
                     .await?;
 
-            let (mut shell_send, shell_recv) = shell_socket.split();
-            let (mut control_send, control_recv) = control_socket.split();
-
-            let (request_tx, mut request_rx) =
-                futures::channel::mpsc::channel::<JupyterMessage>(100);
-
-            let recv_task = cx.spawn({
-                let session = session.clone();
-                let mut iopub = iopub_socket;
-                let mut shell = shell_recv;
-                let mut control = control_recv;
-
-                async move |cx| -> anyhow::Result<()> {
-                    loop {
-                        let (channel, result) = futures::select! {
-                            msg = iopub.read().fuse() => ("iopub", msg),
-                            msg = shell.read().fuse() => ("shell", msg),
-                            msg = control.read().fuse() => ("control", msg),
-                        };
-                        match result {
-                            Ok(message) => {
-                                session
-                                    .update_in(cx, |session, window, cx| {
-                                        session.route(&message, window, cx);
-                                    })
-                                    .ok();
-                            }
-                            Err(err) => {
-                                log::warn!("kernel: error reading from {channel}: {err:?}");
-                                anyhow::bail!("{channel} recv: {err}");
-                            }
-                        }
-                    }
-                }
-            });
-
-            let routing_task = cx.background_spawn({
-                async move {
-                    while let Some(message) = request_rx.next().await {
-                        match message.content {
-                            JupyterMessageContent::DebugRequest(_)
-                            | JupyterMessageContent::InterruptRequest(_)
-                            | JupyterMessageContent::ShutdownRequest(_) => {
-                                control_send.send(message).await?;
-                            }
-                            _ => {
-                                shell_send.send(message).await?;
-                            }
-                        }
-                    }
-                    anyhow::Ok(())
-                }
-            });
+            let request_tx = start_kernel_tasks(
+                session.clone(),
+                iopub_socket,
+                shell_socket,
+                control_socket,
+                cx,
+            );
 
             let stderr = process.stderr.take();
-
             cx.spawn(async move |_cx| {
-                if stderr.is_none() {
-                    return;
-                }
-                let reader = BufReader::new(stderr.unwrap());
-                let mut lines = reader.lines();
-                while let Some(Ok(line)) = lines.next().await {
-                    log::error!("{}", line);
+                if let Some(stderr) = stderr {
+                    let reader = BufReader::new(stderr);
+                    let mut lines = reader.lines();
+                    while let Some(Ok(line)) = lines.next().await {
+                        log::warn!("wsl kernel stderr: {}", line);
+                    }
                 }
             })
             .detach();
 
             let stdout = process.stdout.take();
-
             cx.spawn(async move |_cx| {
-                if stdout.is_none() {
-                    return;
-                }
-                let reader = BufReader::new(stdout.unwrap());
-                let mut lines = reader.lines();
-                while let Some(Ok(_line)) = lines.next().await {}
-            })
-            .detach();
-
-            cx.spawn({
-                let session = session.clone();
-                async move |cx| {
-                    async fn with_name(
-                        name: &'static str,
-                        task: Task<Result<()>>,
-                    ) -> (&'static str, Result<()>) {
-                        (name, task.await)
-                    }
-
-                    let mut tasks = FuturesUnordered::new();
-                    tasks.push(with_name("recv task", recv_task));
-                    tasks.push(with_name("routing task", routing_task));
-
-                    while let Some((name, result)) = tasks.next().await {
-                         if let Err(err) = result {
-                            session.update(cx, |session, cx| {
-                                session.kernel_errored(
-                                    format!("handling failed for {name}: {err}"),
-                                    cx,
-                                );
-                                cx.notify();
-                            });
-                        }
-                    }
+                if let Some(stdout) = stdout {
+                    let reader = BufReader::new(stdout);
+                    let mut lines = reader.lines();
+                    while let Some(Ok(_line)) = lines.next().await {}
                 }
             })
             .detach();
