@@ -89,6 +89,7 @@ pub struct NativeRunningKernel {
     _process_status_task: Option<Task<()>>,
     pub working_directory: PathBuf,
     pub request_tx: mpsc::Sender<JupyterMessage>,
+    pub stdin_tx: mpsc::Sender<JupyterMessage>,
     pub execution_state: ExecutionState,
     pub kernel_info: Option<KernelInfoReply>,
 }
@@ -153,18 +154,33 @@ impl NativeRunningKernel {
             let iopub_socket =
                 runtimelib::create_client_iopub_connection(&connection_info, "", &session_id)
                     .await?;
-            let shell_socket =
-                runtimelib::create_client_shell_connection(&connection_info, &session_id).await?;
             let control_socket =
                 runtimelib::create_client_control_connection(&connection_info, &session_id).await?;
 
-            let request_tx = start_kernel_tasks(
+            let peer_identity = runtimelib::peer_identity_for_session(&session_id)?;
+            let shell_socket =
+                runtimelib::create_client_shell_connection_with_identity(
+                    &connection_info,
+                    &session_id,
+                    peer_identity.clone(),
+                )
+                .await?;
+            let stdin_socket = runtimelib::create_client_stdin_connection_with_identity(
+                &connection_info,
+                &session_id,
+                peer_identity,
+            )
+            .await?;
+
+            let (request_tx, stdin_tx) = start_kernel_tasks(
                 session.clone(),
                 iopub_socket,
                 shell_socket,
                 control_socket,
+                stdin_socket,
                 cx,
             );
+
 
             let stderr = process.stderr.take();
             let stdout = process.stdout.take();
@@ -224,6 +240,7 @@ impl NativeRunningKernel {
             anyhow::Ok(Box::new(Self {
                 process,
                 request_tx,
+                stdin_tx,
                 working_directory,
                 _process_status_task: Some(process_status_task),
                 connection_path,
@@ -237,6 +254,10 @@ impl NativeRunningKernel {
 impl RunningKernel for NativeRunningKernel {
     fn request_tx(&self) -> mpsc::Sender<JupyterMessage> {
         self.request_tx.clone()
+    }
+
+    fn stdin_tx(&self) -> mpsc::Sender<JupyterMessage> {
+        self.stdin_tx.clone()
     }
 
     fn working_directory(&self) -> &PathBuf {
@@ -267,6 +288,7 @@ impl RunningKernel for NativeRunningKernel {
     fn kill(&mut self) {
         self._process_status_task.take();
         self.request_tx.close_channel();
+        self.stdin_tx.close_channel();
         self.process.kill().ok();
     }
 }

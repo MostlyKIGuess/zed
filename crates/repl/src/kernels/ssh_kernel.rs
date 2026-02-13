@@ -16,6 +16,7 @@ use util::ResultExt;
 #[derive(Debug)]
 pub struct SshRunningKernel {
     request_tx: mpsc::Sender<JupyterMessage>,
+    stdin_tx: mpsc::Sender<JupyterMessage>,
     execution_state: ExecutionState,
     kernel_info: Option<KernelInfoReply>,
     working_directory: PathBuf,
@@ -208,32 +209,46 @@ impl SshRunningKernel {
                 serde_json::from_value(local_connection_info)?;
             let session_id = uuid::Uuid::new_v4().to_string();
 
-            let iopub_socket = runtimelib::create_client_iopub_connection(
+            let output_socket = runtimelib::create_client_iopub_connection(
                 &connection_info_struct,
                 "",
                 &session_id,
             )
             .await
             .context("failed to create iopub connection")?;
-            let shell_socket =
-                runtimelib::create_client_shell_connection(&connection_info_struct, &session_id)
-                    .await
-                    .context("failed to create shell connection")?;
+
+            let peer_identity = runtimelib::peer_identity_for_session(&session_id)?;
+            let shell_socket = runtimelib::create_client_shell_connection_with_identity(
+                &connection_info_struct,
+                &session_id,
+                peer_identity.clone(),
+            )
+            .await
+            .context("failed to create shell connection")?;
             let control_socket =
                 runtimelib::create_client_control_connection(&connection_info_struct, &session_id)
                     .await
                     .context("failed to create control connection")?;
+            let stdin_socket = runtimelib::create_client_stdin_connection_with_identity(
+                &connection_info_struct,
+                &session_id,
+                peer_identity,
+            )
+            .await
+            .context("failed to create stdin connection")?;
 
-            let request_tx = start_kernel_tasks(
+            let (request_tx, stdin_tx) = start_kernel_tasks(
                 session.clone(),
-                iopub_socket,
+                output_socket,
                 shell_socket,
                 control_socket,
+                stdin_socket,
                 cx,
             );
 
             Ok(Box::new(SshRunningKernel {
                 request_tx,
+                stdin_tx,
                 execution_state: ExecutionState::Idle,
                 kernel_info: None,
                 working_directory,
@@ -250,6 +265,10 @@ impl SshRunningKernel {
 impl RunningKernel for SshRunningKernel {
     fn request_tx(&self) -> mpsc::Sender<JupyterMessage> {
         self.request_tx.clone()
+    }
+
+    fn stdin_tx(&self) -> mpsc::Sender<JupyterMessage> {
+        self.stdin_tx.clone()
     }
 
     fn working_directory(&self) -> &PathBuf {

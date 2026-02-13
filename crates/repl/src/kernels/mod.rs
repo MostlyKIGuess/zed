@@ -22,8 +22,8 @@ use futures::{FutureExt, StreamExt};
 use gpui::{AppContext, AsyncWindowContext, Context};
 use jupyter_protocol::{JupyterKernelspec, JupyterMessageContent};
 use runtimelib::{
-    ClientControlConnection, ClientIoPubConnection, ClientShellConnection, ExecutionState,
-    JupyterMessage, KernelInfoReply,
+    ClientControlConnection, ClientIoPubConnection, ClientShellConnection, ClientStdinConnection,
+    ExecutionState, JupyterMessage, KernelInfoReply,
 };
 use ui::{Icon, IconName, SharedString};
 use util::rel_path::RelPath;
@@ -33,18 +33,25 @@ pub fn start_kernel_tasks<S: KernelSession + 'static>(
     iopub_socket: ClientIoPubConnection,
     shell_socket: ClientShellConnection,
     control_socket: ClientControlConnection,
+    stdin_socket: ClientStdinConnection,
     cx: &mut AsyncWindowContext,
-) -> futures::channel::mpsc::Sender<JupyterMessage> {
+) -> (
+    futures::channel::mpsc::Sender<JupyterMessage>,
+    futures::channel::mpsc::Sender<JupyterMessage>,
+) {
     let (mut shell_send, shell_recv) = shell_socket.split();
     let (mut control_send, control_recv) = control_socket.split();
+    let (mut stdin_send, stdin_recv) = stdin_socket.split();
 
     let (request_tx, mut request_rx) = futures::channel::mpsc::channel::<JupyterMessage>(100);
+    let (stdin_tx, mut stdin_rx) = futures::channel::mpsc::channel::<JupyterMessage>(100);
 
     let recv_task = cx.spawn({
         let session = session.clone();
         let mut iopub = iopub_socket;
         let mut shell = shell_recv;
         let mut control = control_recv;
+        let mut stdin = stdin_recv;
 
         async move |cx| -> anyhow::Result<()> {
             loop {
@@ -52,6 +59,7 @@ pub fn start_kernel_tasks<S: KernelSession + 'static>(
                     msg = iopub.read().fuse() => ("iopub", msg),
                     msg = shell.read().fuse() => ("shell", msg),
                     msg = control.read().fuse() => ("control", msg),
+                    msg = stdin.read().fuse() => ("stdin", msg),
                 };
                 match result {
                     Ok(message) => {
@@ -99,6 +107,13 @@ pub fn start_kernel_tasks<S: KernelSession + 'static>(
         anyhow::Ok(())
     });
 
+    let stdin_routing_task = cx.background_spawn(async move {
+        while let Some(message) = stdin_rx.next().await {
+            stdin_send.send(message).await?;
+        }
+        anyhow::Ok(())
+    });
+
     cx.spawn({
         async move |cx| {
             async fn with_name(
@@ -111,6 +126,7 @@ pub fn start_kernel_tasks<S: KernelSession + 'static>(
             let mut tasks = futures::stream::FuturesUnordered::new();
             tasks.push(with_name("recv task", recv_task));
             tasks.push(with_name("routing task", routing_task));
+            tasks.push(with_name("stdin routing task", stdin_routing_task));
 
             while let Some((name, result)) = tasks.next().await {
                 if let Err(err) = result {
@@ -124,7 +140,7 @@ pub fn start_kernel_tasks<S: KernelSession + 'static>(
     })
     .detach();
 
-    request_tx
+    (request_tx, stdin_tx)
 }
 
 pub trait KernelSession: Sized {
@@ -536,6 +552,7 @@ pub fn python_env_kernel_specifications(
 
 pub trait RunningKernel: Send + Debug {
     fn request_tx(&self) -> mpsc::Sender<JupyterMessage>;
+    fn stdin_tx(&self) -> mpsc::Sender<JupyterMessage>;
     fn working_directory(&self) -> &PathBuf;
     fn execution_state(&self) -> &ExecutionState;
     fn set_execution_state(&mut self, state: ExecutionState);

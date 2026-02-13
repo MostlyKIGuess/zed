@@ -4540,16 +4540,18 @@ impl Workspace {
 
         // If this pane is in a dock, preserve that dock when dismissing zoomed items.
         // This prevents the dock from closing when focus events fire during window activation.
+        // We also preserve any dock whose active panel itself has focus — this covers
+        // panels like AgentPanel that don't implement `pane()` but can still be zoomed.
         let dock_to_preserve = self.all_docks().iter().find_map(|dock| {
             let dock_read = dock.read(cx);
-            if let Some(panel) = dock_read.active_panel()
-                && let Some(dock_pane) = panel.pane(cx)
-                && dock_pane == pane
-            {
-                Some(dock_read.position())
-            } else {
-                None
+            if let Some(panel) = dock_read.active_panel() {
+                if panel.pane(cx).is_some_and(|dock_pane| dock_pane == pane)
+                    || panel.panel_focus_handle(cx).contains_focused(window, cx)
+                {
+                    return Some(dock_read.position());
+                }
             }
+            None
         });
 
         self.dismiss_zoomed_items_to_reveal(dock_to_preserve, window, cx);
@@ -12724,6 +12726,101 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    async fn test_panel_zoom_preserved_across_workspace_switch(cx: &mut TestAppContext) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+
+        let project_a = Project::test(fs.clone(), [], cx).await;
+        let project_b = Project::test(fs, [], cx).await;
+
+        let multi_workspace_handle =
+            cx.add_window(|window, cx| MultiWorkspace::test_new(project_a.clone(), window, cx));
+
+        let workspace_a = multi_workspace_handle
+            .read_with(cx, |mw, _| mw.workspace().clone())
+            .unwrap();
+
+        let _workspace_b = multi_workspace_handle
+            .update(cx, |mw, window, cx| {
+                mw.test_add_workspace(project_b, window, cx)
+            })
+            .unwrap();
+
+        // Switch to workspace A
+        multi_workspace_handle
+            .update(cx, |mw, window, cx| {
+                mw.activate_index(0, window, cx);
+            })
+            .unwrap();
+
+        let cx = &mut VisualTestContext::from_window(multi_workspace_handle.into(), cx);
+
+        // Add a panel to workspace A's right dock and open the dock
+        let panel = workspace_a.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Right, 100, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace
+                .right_dock()
+                .update(cx, |dock, cx| dock.set_open(true, window, cx));
+            panel
+        });
+
+        // Focus the panel through the workspace (matching existing test pattern)
+        workspace_a.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_panel_focus::<TestPanel>(window, cx);
+        });
+
+        // Zoom the panel
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_zoomed(true, window, cx);
+        });
+
+        // Verify the panel is zoomed and the dock is open
+        workspace_a.update_in(cx, |workspace, window, cx| {
+            assert!(
+                workspace.right_dock().read(cx).is_open(),
+                "dock should be open before switch"
+            );
+            assert!(
+                panel.is_zoomed(window, cx),
+                "panel should be zoomed before switch"
+            );
+            assert!(
+                panel.read(cx).focus_handle(cx).contains_focused(window, cx),
+                "panel should be focused before switch"
+            );
+        });
+
+        // Switch to workspace B
+        multi_workspace_handle
+            .update(cx, |mw, window, cx| {
+                mw.activate_index(1, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        // Switch back to workspace A
+        multi_workspace_handle
+            .update(cx, |mw, window, cx| {
+                mw.activate_index(0, window, cx);
+            })
+            .unwrap();
+        cx.run_until_parked();
+
+        // Verify the panel is still zoomed and the dock is still open
+        workspace_a.update_in(cx, |workspace, window, cx| {
+            assert!(
+                workspace.right_dock().read(cx).is_open(),
+                "dock should still be open after switching back"
+            );
+            assert!(
+                panel.is_zoomed(window, cx),
+                "panel should still be zoomed after switching back"
+            );
+        });
+    }
+
     fn pane_items_paths(pane: &Entity<Pane>, cx: &App) -> Vec<String> {
         pane.read(cx)
             .items()
@@ -12749,5 +12846,68 @@ mod tests {
             item.is_dirty = true;
         });
         item
+    }
+
+    #[gpui::test]
+    async fn test_zoomed_panel_without_pane_preserved_on_center_focus(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        init_test(cx);
+        let fs = FakeFs::new(cx.executor());
+
+        let project = Project::test(fs, [], cx).await;
+        let (workspace, cx) =
+            cx.add_window_view(|window, cx| Workspace::test_new(project, window, cx));
+
+        let panel = workspace.update_in(cx, |workspace, window, cx| {
+            let panel = cx.new(|cx| TestPanel::new(DockPosition::Right, 100, cx));
+            workspace.add_panel(panel.clone(), window, cx);
+            workspace
+                .right_dock()
+                .update(cx, |dock, cx| dock.set_open(true, window, cx));
+            panel
+        });
+
+        let pane = workspace.read_with(cx, |workspace, _| workspace.active_pane().clone());
+        pane.update_in(cx, |pane, window, cx| {
+            let item = cx.new(TestItem::new);
+            pane.add_item(Box::new(item), true, true, None, window, cx);
+        });
+
+        // Transfer focus to the panel, then zoom it. Using toggle_panel_focus
+        // mirrors the real-world flow and avoids side effects from directly
+        // focusing the panel while the center pane is active.
+        workspace.update_in(cx, |workspace, window, cx| {
+            workspace.toggle_panel_focus::<TestPanel>(window, cx);
+        });
+
+        panel.update_in(cx, |panel, window, cx| {
+            panel.set_zoomed(true, window, cx);
+        });
+
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(workspace.right_dock().read(cx).is_open());
+            assert!(panel.is_zoomed(window, cx));
+            assert!(panel.read(cx).focus_handle(cx).contains_focused(window, cx));
+        });
+
+        // Simulate a spurious pane::Event::Focus on the center pane while the
+        // panel still has focus. This mirrors what happens during macOS window
+        // activation: the center pane fires a focus event even though actual
+        // focus remains on the dock panel.
+        pane.update_in(cx, |_, _, cx| {
+            cx.emit(pane::Event::Focus);
+        });
+
+        // The dock must remain open because the panel had focus at the time the
+        // event was processed. Before the fix, dock_to_preserve was None for
+        // panels that don't implement pane(), causing the dock to close.
+        workspace.update_in(cx, |workspace, window, cx| {
+            assert!(
+                workspace.right_dock().read(cx).is_open(),
+                "Dock should stay open when its zoomed panel (without pane()) still has focus"
+            );
+            assert!(panel.is_zoomed(window, cx));
+        });
     }
 }

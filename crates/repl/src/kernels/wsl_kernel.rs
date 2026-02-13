@@ -21,7 +21,6 @@ use std::{
     path::PathBuf,
     sync::Arc,
 };
-use util::ResultExt;
 use uuid::Uuid;
 
 // Find a set of open ports. This creates a listener with port set to 0. The listener will be closed at the end when it goes out of scope.
@@ -44,6 +43,7 @@ pub struct WslRunningKernel {
     _process_status_task: Option<Task<()>>,
     pub working_directory: PathBuf,
     pub request_tx: mpsc::Sender<JupyterMessage>,
+    pub stdin_tx: mpsc::Sender<JupyterMessage>,
     pub execution_state: ExecutionState,
     pub kernel_info: Option<KernelInfoReply>,
 }
@@ -326,26 +326,38 @@ impl WslRunningKernel {
                 Err(_) => {}
             }
 
-            let iopub_socket = runtimelib::create_client_iopub_connection(
+            let output_socket = runtimelib::create_client_iopub_connection(
                 &client_connection_info,
                 "",
                 &session_id,
             )
             .await?;
 
-            let shell_socket =
-                runtimelib::create_client_shell_connection(&client_connection_info, &session_id)
-                    .await?;
+            let peer_identity = runtimelib::peer_identity_for_session(&session_id)?;
+            let shell_socket = runtimelib::create_client_shell_connection_with_identity(
+                &client_connection_info,
+                &session_id,
+                peer_identity.clone(),
+            )
+            .await?;
 
             let control_socket =
                 runtimelib::create_client_control_connection(&client_connection_info, &session_id)
                     .await?;
 
-            let request_tx = start_kernel_tasks(
+            let stdin_socket = runtimelib::create_client_stdin_connection_with_identity(
+                &client_connection_info,
+                &session_id,
+                peer_identity,
+            )
+            .await?;
+
+            let (request_tx, stdin_tx) = start_kernel_tasks(
                 session.clone(),
-                iopub_socket,
+                output_socket,
                 shell_socket,
                 control_socket,
+                stdin_socket,
                 cx,
             );
 
@@ -397,6 +409,7 @@ impl WslRunningKernel {
             anyhow::Ok(Box::new(Self {
                 process,
                 request_tx,
+                stdin_tx,
                 working_directory,
                 _process_status_task: Some(process_status_task),
                 connection_path,
@@ -410,6 +423,10 @@ impl WslRunningKernel {
 impl RunningKernel for WslRunningKernel {
     fn request_tx(&self) -> mpsc::Sender<JupyterMessage> {
         self.request_tx.clone()
+    }
+
+    fn stdin_tx(&self) -> mpsc::Sender<JupyterMessage> {
+        self.stdin_tx.clone()
     }
 
     fn working_directory(&self) -> &PathBuf {
@@ -435,13 +452,14 @@ impl RunningKernel for WslRunningKernel {
     fn force_shutdown(&mut self, _window: &mut Window, _cx: &mut App) -> Task<anyhow::Result<()>> {
         self._process_status_task.take();
         self.request_tx.close_channel();
-        Task::ready(self.process.kill().context("killing the kernel process"))
+        self.process.kill().ok();
+        Task::ready(Ok(()))
     }
 
     fn kill(&mut self) {
         self._process_status_task.take();
         self.request_tx.close_channel();
-        self.process.kill().log_err();
+        self.process.kill().ok();
     }
 }
 
