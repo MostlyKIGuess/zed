@@ -132,11 +132,39 @@ pub trait KernelSession: Sized {
     fn kernel_errored(&mut self, error_message: String, cx: &mut Context<Self>);
 }
 
+#[derive(Debug, Clone)]
+pub struct PythonEnvKernelSpecification {
+    pub name: String,
+    pub path: PathBuf,
+    pub kernelspec: JupyterKernelspec,
+    pub has_ipykernel: bool,
+    /// Display label for the environment type: "venv", "Conda", "Pyenv", etc.
+    pub environment_kind: Option<String>,
+}
+
+impl PartialEq for PythonEnvKernelSpecification {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name && self.path == other.path
+    }
+}
+
+impl Eq for PythonEnvKernelSpecification {}
+
+impl PythonEnvKernelSpecification {
+    pub fn as_local_spec(&self) -> LocalKernelSpecification {
+        LocalKernelSpecification {
+            name: self.name.clone(),
+            path: self.path.clone(),
+            kernelspec: self.kernelspec.clone(),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum KernelSpecification {
     JupyterServer(RemoteKernelSpecification),
     Jupyter(LocalKernelSpecification),
-    PythonEnv(LocalKernelSpecification),
+    PythonEnv(PythonEnvKernelSpecification),
     SshRemote(SshRemoteKernelSpecification),
     WslRemote(WslKernelSpecification),
 }
@@ -144,6 +172,7 @@ pub enum KernelSpecification {
 #[derive(Debug, Clone)]
 pub struct SshRemoteKernelSpecification {
     pub name: String,
+    pub path: SharedString,
     pub kernelspec: JupyterKernelspec,
 }
 
@@ -158,6 +187,7 @@ impl PartialEq for SshRemoteKernelSpecification {
     fn eq(&self, other: &Self) -> bool {
         self.name == other.name
             && self.kernelspec.argv == other.kernelspec.argv
+            && self.path == other.path
             && self.kernelspec.display_name == other.kernelspec.display_name
             && self.kernelspec.language == other.kernelspec.language
             && self.kernelspec.interrupt_mode == other.kernelspec.interrupt_mode
@@ -197,7 +227,11 @@ impl KernelSpecification {
     pub fn type_name(&self) -> SharedString {
         match self {
             Self::Jupyter(_) => "Jupyter".into(),
-            Self::PythonEnv(_) => "Python Environment".into(),
+            Self::PythonEnv(spec) => SharedString::from(
+                spec.environment_kind
+                    .clone()
+                    .unwrap_or_else(|| "Python Environment".to_string()),
+            ),
             Self::JupyterServer(_) => "Jupyter Server".into(),
             Self::SshRemote(_) => "SSH Remote".into(),
             Self::WslRemote(_) => "WSL Remote".into(),
@@ -209,7 +243,7 @@ impl KernelSpecification {
             Self::Jupyter(spec) => spec.path.to_string_lossy().into_owned(),
             Self::PythonEnv(spec) => spec.path.to_string_lossy().into_owned(),
             Self::JupyterServer(spec) => spec.url.to_string(),
-            Self::SshRemote(_) => "Remote".to_string(),
+            Self::SshRemote(spec) => spec.path.to_string(),
             Self::WslRemote(_) => "WSL".to_string(),
         })
     }
@@ -222,6 +256,28 @@ impl KernelSpecification {
             Self::SshRemote(spec) => spec.kernelspec.language.clone(),
             Self::WslRemote(spec) => spec.kernelspec.language.clone(),
         })
+    }
+
+    pub fn has_ipykernel(&self) -> bool {
+        match self {
+            Self::Jupyter(_) | Self::JupyterServer(_) | Self::SshRemote(_) | Self::WslRemote(_) => {
+                true
+            }
+            Self::PythonEnv(spec) => spec.has_ipykernel,
+        }
+    }
+
+    pub fn environment_kind_label(&self) -> Option<SharedString> {
+        match self {
+            Self::PythonEnv(spec) => spec
+                .environment_kind
+                .as_ref()
+                .map(|kind| SharedString::from(kind.clone())),
+            Self::Jupyter(_) => Some("Jupyter".into()),
+            Self::JupyterServer(_) => Some("Jupyter Server".into()),
+            Self::SshRemote(_) => Some("SSH Remote".into()),
+            Self::WslRemote(_) => Some("WSL Remote".into()),
+        }
     }
 
     pub fn icon(&self, cx: &App) -> Icon {
@@ -238,6 +294,33 @@ impl KernelSpecification {
             .map(Icon::from_path)
             .unwrap_or(Icon::new(IconName::ReplNeutral))
     }
+}
+
+fn extract_environment_kind(toolchain_json: &serde_json::Value) -> Option<String> {
+    let kind_str = toolchain_json.get("kind")?.as_str()?;
+    let label = match kind_str {
+        "Conda" => "Conda",
+        "Pixi" => "pixi",
+        "Homebrew" => "Homebrew",
+        "Pyenv" => "global (Pyenv)",
+        "GlobalPaths" => "global",
+        "PyenvVirtualEnv" => "Pyenv",
+        "Pipenv" => "Pipenv",
+        "Poetry" => "Poetry",
+        "MacPythonOrg" => "global (Python.org)",
+        "MacCommandLineTools" => "global (Command Line Tools for Xcode)",
+        "LinuxGlobal" => "global",
+        "MacXCode" => "global (Xcode)",
+        "Venv" => "venv",
+        "VirtualEnv" => "virtualenv",
+        "VirtualEnvWrapper" => "virtualenvwrapper",
+        "WindowsStore" => "global (Windows Store)",
+        "WindowsRegistry" => "global (Windows Registry)",
+        "Uv" => "uv",
+        "UvWorkspace" => "uv (Workspace)",
+        _ => kind_str,
+    };
+    Some(label.to_string())
 }
 
 pub fn python_env_kernel_specifications(
@@ -295,36 +378,7 @@ pub fn python_env_kernel_specifications(
                         );
                         let default_kernelspec = JupyterKernelspec {
                             argv: vec![
-                                "python3".to_string(), // using generic python3 for now on remote
-                            ],
-                            display_name: format!("Remote {}", toolchain.name),
-                            language: "python".to_string(),
-                            interrupt_mode: None,
-                            metadata: None,
-                            env: None,
-                        };
-
-                        return Some(KernelSpecification::SshRemote(
-                            SshRemoteKernelSpecification {
-                                name: format!("Remote {}", toolchain.name),
-                                kernelspec: default_kernelspec,
-                            },
-                        ));
-                    }
-
-                    let python_path = toolchain.path.to_string();
-
-                    // Check if ipykernel is installed
-                    let ipykernel_check = util::command::new_smol_command(&python_path)
-                        .args(&["-c", "import ipykernel"])
-                        .output()
-                        .await;
-
-                    if ipykernel_check.is_ok() && ipykernel_check.unwrap().status.success() {
-                        // Create a default kernelspec for this environment
-                        let default_kernelspec = JupyterKernelspec {
-                            argv: vec![
-                                python_path.clone(),
+                                toolchain.path.to_string(),
                                 "-m".to_string(),
                                 "ipykernel_launcher".to_string(),
                                 "-f".to_string(),
@@ -337,18 +391,47 @@ pub fn python_env_kernel_specifications(
                             env: None,
                         };
 
-                        Some(KernelSpecification::PythonEnv(LocalKernelSpecification {
-                            name: toolchain.name.to_string(),
-                            path: PathBuf::from(&python_path),
-                            kernelspec: default_kernelspec,
-                        }))
-                    } else {
-                        log::info!(
-                            "python_env_kernel_specifications: ipykernel check failed for toolchain {}",
-                            toolchain.name
-                        );
-                        None
+                        return Some(KernelSpecification::SshRemote(
+                            SshRemoteKernelSpecification {
+                                name: format!("Remote {}", toolchain.name),
+                                path: toolchain.path.clone(),
+                                kernelspec: default_kernelspec,
+                            },
+                        ));
                     }
+
+                    let python_path = toolchain.path.to_string();
+                    let environment_kind = extract_environment_kind(&toolchain.as_json);
+
+                    let has_ipykernel = util::command::new_smol_command(&python_path)
+                        .args(&["-c", "import ipykernel"])
+                        .output()
+                        .await
+                        .map(|output| output.status.success())
+                        .unwrap_or(false);
+
+                    let kernelspec = JupyterKernelspec {
+                        argv: vec![
+                            python_path.clone(),
+                            "-m".to_string(),
+                            "ipykernel_launcher".to_string(),
+                            "-f".to_string(),
+                            "{connection_file}".to_string(),
+                        ],
+                        display_name: toolchain.name.to_string(),
+                        language: "python".to_string(),
+                        interrupt_mode: None,
+                        metadata: None,
+                        env: None,
+                    };
+
+                    Some(KernelSpecification::PythonEnv(PythonEnvKernelSpecification {
+                        name: toolchain.name.to_string(),
+                        path: PathBuf::from(&python_path),
+                        kernelspec,
+                        has_ipykernel,
+                        environment_kind,
+                    }))
                 })
             });
 

@@ -35,7 +35,7 @@ use language::Point;
 use project::Fs;
 use runtimelib::{
     ExecuteRequest, ExecutionState, InterruptRequest, JupyterMessage, JupyterMessageContent,
-    ShutdownRequest,
+    KernelInfoRequest, ShutdownRequest,
 };
 use settings::Settings as _;
 use std::{env::temp_dir, ops::Range, sync::Arc, time::Duration};
@@ -266,12 +266,12 @@ impl Session {
 
         // For WSL Remote kernels, use project root instead of potentially temporary working directory
         // which causes .venv/bin/python checks to fail
-        let is_wsl_remote = matches!(
+        let is_remote_execution = matches!(
             self.kernel_specification,
-            crate::KernelSpecification::WslRemote(_)
+            crate::KernelSpecification::WslRemote(_) | crate::KernelSpecification::SshRemote(_)
         );
 
-        let working_directory = if is_wsl_remote {
+        let working_directory = if is_remote_execution {
             // For WSL Remote kernels, use project root instead of potentially temporary working directory
             // which causes .venv/bin/python checks to fail
             self.editor
@@ -302,9 +302,17 @@ impl Session {
         let session_view = cx.entity();
 
         let kernel = match self.kernel_specification.clone() {
-            KernelSpecification::Jupyter(kernel_specification)
-            | KernelSpecification::PythonEnv(kernel_specification) => NativeRunningKernel::new(
+            KernelSpecification::Jupyter(kernel_specification) => NativeRunningKernel::new(
                 kernel_specification,
+                entity_id,
+                working_directory,
+                self.fs.clone(),
+                session_view,
+                window,
+                cx,
+            ),
+            KernelSpecification::PythonEnv(env_specification) => NativeRunningKernel::new(
+                env_specification.as_local_spec(),
                 entity_id,
                 working_directory,
                 self.fs.clone(),
@@ -358,6 +366,8 @@ impl Session {
                     Ok(kernel) => {
                         this.update(cx, |session, cx| {
                             session.kernel(Kernel::RunningKernel(kernel), cx);
+                            let request = JupyterMessageContent::KernelInfoRequest(KernelInfoRequest {});
+                            session.send(request.into(), cx).log_err();
                         })
                         .ok();
                     }

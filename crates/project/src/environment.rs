@@ -346,13 +346,14 @@ async fn load_directory_shell_environment(
     };
 
     let (shell, args) = shell.program_and_args();
-    let mut envs = util::shell_env::capture(shell.clone(), args, abs_path)
+    let mut envs = util::shell_env::capture(shell.clone(), args, abs_path.clone())
         .await
         .with_context(|| {
             tx.unbounded_send("Failed to load environment variables".into())
                 .ok();
             format!("capturing shell environment with {shell:?}")
         })?;
+
 
     if cfg!(target_os = "windows")
         && let Some(path) = envs.remove("Path")

@@ -13,8 +13,8 @@ use http_client::HttpClient;
 use language::{Buffer, BufferEvent, LanguageRegistry, proto::serialize_operation};
 use node_runtime::NodeRuntime;
 use project::{
-    LspStore, LspStoreEvent, ManifestTree, PrettierStore, ProjectEnvironment, ProjectPath,
-    ToolchainStore, WorktreeId,
+    AgentRegistryStore, LspStore, LspStoreEvent, ManifestTree, PrettierStore, ProjectEnvironment,
+    ProjectPath, ToolchainStore, WorktreeId,
     agent_server_store::AgentServerStore,
     buffer_store::{BufferStore, BufferStoreEvent},
     context_server_store::ContextServerStore,
@@ -225,6 +225,8 @@ impl HeadlessProject {
             lsp_store.shared(REMOTE_SERVER_PROJECT_ID, session.clone(), cx);
             lsp_store
         });
+
+        AgentRegistryStore::init_global(cx, fs.clone(), http_client.clone());
 
         let agent_server_store = cx.new(|cx| {
             let mut agent_server_store = AgentServerStore::local(
@@ -942,13 +944,25 @@ impl HeadlessProject {
 
         // Spawn kernel (Assuming python for now, or we'd need to parse kernelspec logic here or pass the command)
 
-        let spawn_kernel = |binary: &str| {
+        // Spawn kernel
+        let spawn_kernel = |binary: &str, args: &[String]| {
             let mut command = smol::process::Command::new(binary);
-            command
-                .arg("-m")
-                .arg("ipykernel_launcher")
-                .arg("-f")
-                .arg(&connection_file_path);
+
+            if !args.is_empty() {
+                for arg in args {
+                    if arg == "{connection_file}" {
+                        command.arg(&connection_file_path);
+                    } else {
+                        command.arg(arg);
+                    }
+                }
+            } else {
+                command
+                    .arg("-m")
+                    .arg("ipykernel_launcher")
+                    .arg("-f")
+                    .arg(&connection_file_path);
+            }
 
             if let Some(wd) = &working_directory {
                 command.current_dir(wd);
@@ -957,9 +971,14 @@ impl HeadlessProject {
         };
 
         // We need to manage the child process lifecycle
-        let child = spawn_kernel("python3")
-            .or_else(|_| spawn_kernel("python"))
-            .context("failed to spawn kernel process (tried python3 and python)")?;
+        let child = if !envelope.payload.command.is_empty() {
+            spawn_kernel(&envelope.payload.command, &envelope.payload.args)
+                .context(format!("failed to spawn kernel process (command: {})", envelope.payload.command))?
+        } else {
+            spawn_kernel("python3", &[])
+                .or_else(|_| spawn_kernel("python", &[]))
+                .context("failed to spawn kernel process (tried python3 and python)")?
+        };
 
         this.update(&mut cx.clone(), |this, _cx| {
             this.kernels.insert(kernel_id.clone(), child);

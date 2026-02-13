@@ -551,6 +551,8 @@ message SpawnKernel {
   string kernel_name = 1;
   string working_directory = 2;
   uint64 project_id = 3;
+  string command = 4;
+  repeated string args = 5;
 }
 
 message SpawnKernelResponse {

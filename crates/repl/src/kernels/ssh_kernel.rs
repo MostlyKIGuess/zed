@@ -37,18 +37,41 @@ impl SshRunningKernel {
     ) -> Task<Result<Box<dyn RunningKernel>>> {
         let client = project.read(cx).client();
         let remote_client = project.read(cx).remote_client();
-        let project_id_opt = project.read(cx).remote_id();
+        let project_id = project
+            .read(cx)
+            .remote_id()
+            .unwrap_or(proto::REMOTE_SERVER_PROJECT_ID);
 
         window.spawn(cx, async move |cx| {
-            let project_id =
-                project_id_opt.ok_or_else(|| anyhow::anyhow!("not connected to remote project"))?;
+            let command = kernel_spec
+                .kernelspec
+                .argv
+                .first()
+                .cloned()
+                .unwrap_or_default();
+            let args = kernel_spec
+                .kernelspec
+                .argv
+                .iter()
+                .skip(1)
+                .cloned()
+                .collect();
 
             let request = proto::SpawnKernel {
                 kernel_name: kernel_spec.name.clone(),
                 working_directory: working_directory.to_string_lossy().to_string(),
                 project_id,
+                command,
+                args,
             };
-            let response = client.request::<proto::SpawnKernel>(request).await?;
+            let response = if let Some(remote_client) = remote_client.as_ref() {
+                remote_client
+                    .read_with(cx, |client, _| client.proto_client())
+                    .request(request)
+                    .await?
+            } else {
+                client.request(request).await?
+            };
 
             let kernel_id = response.kernel_id.clone();
             let connection_info: serde_json::Value =
@@ -115,22 +138,41 @@ impl SshRunningKernel {
                 if let Some(stdout) = stdout {
                     let reader = BufReader::new(stdout);
                     let mut lines = reader.lines();
-                    while let Some(Ok(_line)) = lines.next().await {}
+                    while let Some(Ok(line)) = lines.next().await {
+                        log::debug!("ssh tunnel stdout: {}", line);
+                    }
                 }
             })
             .detach();
 
             // We might or might not need this, perhaps we can just wait for a second or test it this way
             let shell_port = local_ports[0];
-            let max_attempts = 20;
+            let max_attempts = 100;
             let mut connected = false;
             for attempt in 0..max_attempts {
                 match smol::net::TcpStream::connect(format!("127.0.0.1:{}", shell_port)).await {
                     Ok(_) => {
                         connected = true;
+                        log::info!(
+                            "SSH tunnel established for kernel {} on attempt {}",
+                            kernel_id,
+                            attempt + 1
+                        );
+                        // giving the tunnel a moment to fully establish forwarding
+                        cx.background_executor()
+                            .timer(std::time::Duration::from_millis(500))
+                            .await;
                         break;
                     }
-                    Err(_) => {
+                    Err(err) => {
+                        if attempt % 10 == 0 {
+                            log::debug!(
+                                "Waiting for SSH tunnel (attempt {}/{}): {}",
+                                attempt + 1,
+                                max_attempts,
+                                err
+                            );
+                        }
                         if attempt < max_attempts - 1 {
                             cx.background_executor()
                                 .timer(std::time::Duration::from_millis(100))

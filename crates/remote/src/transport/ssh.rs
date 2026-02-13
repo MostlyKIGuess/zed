@@ -1225,6 +1225,10 @@ impl SshSocket {
                 "ControlMaster=no".to_string(),
                 "-o".to_string(),
                 format!("ControlPath={}", self.socket_path.display()),
+                "-o".to_string(),
+                "BatchMode=yes".to_string(),
+                "-o".to_string(),
+                "ConnectTimeout=10".to_string(),
             ]);
             args
         };

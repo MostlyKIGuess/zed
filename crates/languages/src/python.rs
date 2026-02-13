@@ -1330,6 +1330,7 @@ impl ToolchainLister for PythonToolchainProvider {
         );
         let toolchain = pet::resolve::resolve_environment(&path, &locators, &environment)
             .context("Could not find a virtual environment in provided path")?;
+
         let venv = toolchain.resolved.unwrap_or(toolchain.discovered);
         venv_to_toolchain(venv, fs)
             .await
