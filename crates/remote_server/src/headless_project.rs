@@ -972,8 +972,10 @@ impl HeadlessProject {
 
         // We need to manage the child process lifecycle
         let child = if !envelope.payload.command.is_empty() {
-            spawn_kernel(&envelope.payload.command, &envelope.payload.args)
-                .context(format!("failed to spawn kernel process (command: {})", envelope.payload.command))?
+            spawn_kernel(&envelope.payload.command, &envelope.payload.args).context(format!(
+                "failed to spawn kernel process (command: {})",
+                envelope.payload.command
+            ))?
         } else {
             spawn_kernel("python3", &[])
                 .or_else(|_| spawn_kernel("python", &[]))

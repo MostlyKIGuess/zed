@@ -371,7 +371,8 @@ impl Session {
                     Ok(kernel) => {
                         this.update(cx, |session, cx| {
                             session.kernel(Kernel::RunningKernel(kernel), cx);
-                            let request = JupyterMessageContent::KernelInfoRequest(KernelInfoRequest {});
+                            let request =
+                                JupyterMessageContent::KernelInfoRequest(KernelInfoRequest {});
                             session.send(request.into(), cx).log_err();
                         })
                         .ok();

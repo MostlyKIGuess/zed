@@ -354,7 +354,6 @@ async fn load_directory_shell_environment(
             format!("capturing shell environment with {shell:?}")
         })?;
 
-
     if cfg!(target_os = "windows")
         && let Some(path) = envs.remove("Path")
     {

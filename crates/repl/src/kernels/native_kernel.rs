@@ -158,13 +158,12 @@ impl NativeRunningKernel {
                 runtimelib::create_client_control_connection(&connection_info, &session_id).await?;
 
             let peer_identity = runtimelib::peer_identity_for_session(&session_id)?;
-            let shell_socket =
-                runtimelib::create_client_shell_connection_with_identity(
-                    &connection_info,
-                    &session_id,
-                    peer_identity.clone(),
-                )
-                .await?;
+            let shell_socket = runtimelib::create_client_shell_connection_with_identity(
+                &connection_info,
+                &session_id,
+                peer_identity.clone(),
+            )
+            .await?;
             let stdin_socket = runtimelib::create_client_stdin_connection_with_identity(
                 &connection_info,
                 &session_id,
@@ -180,7 +179,6 @@ impl NativeRunningKernel {
                 stdin_socket,
                 cx,
             );
-
 
             let stderr = process.stderr.take();
             let stdout = process.stdout.take();
