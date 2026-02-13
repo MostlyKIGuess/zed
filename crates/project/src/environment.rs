@@ -346,7 +346,7 @@ async fn load_directory_shell_environment(
     };
 
     let (shell, args) = shell.program_and_args();
-    let mut envs = util::shell_env::capture(shell.clone(), args, abs_path.clone())
+    let mut envs = util::shell_env::capture(shell.clone(), args, abs_path)
         .await
         .with_context(|| {
             tx.unbounded_send("Failed to load environment variables".into())
