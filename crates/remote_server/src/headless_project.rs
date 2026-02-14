@@ -964,6 +964,22 @@ impl HeadlessProject {
                     .arg(&connection_file_path);
             }
 
+            // This ensures subprocesses spawned from the kernel use the correct Python environment
+            let python_bin_dir = std::path::Path::new(binary).parent();
+            if let Some(bin_dir) = python_bin_dir {
+                if let Some(path_var) = std::env::var_os("PATH") {
+                    let mut paths = std::env::split_paths(&path_var).collect::<Vec<_>>();
+                    paths.insert(0, bin_dir.to_path_buf());
+                    if let Ok(new_path) = std::env::join_paths(paths) {
+                        command.env("PATH", new_path);
+                    }
+                }
+
+                if let Some(venv_root) = bin_dir.parent() {
+                    command.env("VIRTUAL_ENV", venv_root.to_string_lossy().to_string());
+                }
+            }
+
             if let Some(wd) = &working_directory {
                 command.current_dir(wd);
             }
