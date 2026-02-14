@@ -52,7 +52,7 @@ message Envelope {
         ShareProjectResponse share_project_response = 24;
         UnshareProject unshare_project = 25;
         JoinProject join_project = 26;
-        JoinProjectResponse join_projecr_response = 27;
+        JoinProjectResponse join_project_response = 27;
         LeaveProject leave_project = 28;
         AddProjectCollaborator add_project_collaborator = 29;
         UpdateProjectCollaborator update_project_collaborator = 30;
