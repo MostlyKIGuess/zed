@@ -63,7 +63,10 @@ impl LocalKernelSpecification {
         }
 
         if let Some(env) = &self.kernelspec.env {
-            log::info!("LocalKernelSpecification: applying env to command: {:?}", env.keys());
+            log::info!(
+                "LocalKernelSpecification: applying env to command: {:?}",
+                env.keys()
+            );
             cmd.envs(env);
         } else {
             log::info!("LocalKernelSpecification: no env in kernelspec");

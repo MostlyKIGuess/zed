@@ -442,7 +442,7 @@ pub fn python_env_kernel_specifications(
                             env.insert("VIRTUAL_ENV".to_string(), venv_root.to_string_lossy().to_string());
                         }
                     }
-                    
+
                     log::info!("Preparing Python kernel for toolchain: {}", toolchain.name);
                     log::info!("Python path: {}", python_path);
                     if let Some(path) = env.get("PATH") {
