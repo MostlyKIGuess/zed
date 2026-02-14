@@ -103,7 +103,7 @@ impl WslRunningKernel {
             // Convert connection_path to WSL path
             // yeah we can't assume this is available on WSL.
             // running `wsl -d <distro> wslpath -u <windows_path>`
-            let mut wslpath_cmd = util::command::new_smol_command("wsl");
+            let mut wslpath_cmd = util::command::new_command("wsl");
 
             // On Windows, passing paths with backslashes to wsl.exe can sometimes cause
             // escaping issues or be misinterpreted. Converting to forward slashes is safer
@@ -142,7 +142,7 @@ impl WslRunningKernel {
                 // If path starts with /, assume it is already a WSL path (e.g. /home/user)
                 Some(working_directory_str)
             } else {
-                let mut wslpath_wd_cmd = util::command::new_smol_command("wsl");
+                let mut wslpath_wd_cmd = util::command::new_command("wsl");
                 wslpath_wd_cmd
                     .arg("-d")
                     .arg(&kernel_specification.distro)
@@ -167,7 +167,7 @@ impl WslRunningKernel {
             // we need to handle this better. For now, let's use the converted path
             // if available, otherwise we'll rely on WSL's default home directory.
 
-            let mut cmd = util::command::new_smol_command("wsl");
+            let mut cmd = util::command::new_command("wsl");
             cmd.arg("-d").arg(&kernel_specification.distro);
 
             // Set CWD for the host process to a safe location to avoid "Directory name is invalid"
@@ -494,7 +494,7 @@ struct LocalKernelSpecContent {
 pub async fn wsl_kernel_specifications(
     background_executor: BackgroundExecutor,
 ) -> Result<Vec<KernelSpecification>> {
-    let output = util::command::new_smol_command("wsl")
+    let output = util::command::new_command("wsl")
         .arg("-l")
         .arg("-q")
         .output()
@@ -536,7 +536,7 @@ pub async fn wsl_kernel_specifications(
 
     let tasks = distros.into_iter().map(|distro| {
         background_executor.spawn(async move {
-            let output = util::command::new_smol_command("wsl")
+            let output = util::command::new_command("wsl")
                 .arg("-d")
                 .arg(&distro)
                 .arg("bash")

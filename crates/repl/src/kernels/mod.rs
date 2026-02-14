@@ -17,6 +17,8 @@ pub use ssh_kernel::*;
 mod wsl_kernel;
 pub use wsl_kernel::*;
 
+use std::collections::HashMap;
+
 use anyhow::Result;
 use futures::{FutureExt, StreamExt};
 use gpui::{AppContext, AsyncWindowContext, Context};
@@ -419,12 +421,38 @@ pub fn python_env_kernel_specifications(
                     let python_path = toolchain.path.to_string();
                     let environment_kind = extract_environment_kind(&toolchain.as_json);
 
-                    let has_ipykernel = util::command::new_smol_command(&python_path)
+                    let has_ipykernel = util::command::new_command(&python_path)
                         .args(&["-c", "import ipykernel"])
                         .output()
                         .await
                         .map(|output| output.status.success())
                         .unwrap_or(false);
+
+                    let mut env = HashMap::new();
+                    if let Some(python_bin_dir) = PathBuf::from(&python_path).parent() {
+                        if let Some(path_var) = std::env::var_os("PATH") {
+                            let mut paths = std::env::split_paths(&path_var).collect::<Vec<_>>();
+                            paths.insert(0, python_bin_dir.to_path_buf());
+                            if let Ok(new_path) = std::env::join_paths(paths) {
+                                env.insert("PATH".to_string(), new_path.to_string_lossy().to_string());
+                            }
+                        }
+
+                        if let Some(venv_root) = python_bin_dir.parent() {
+                            env.insert("VIRTUAL_ENV".to_string(), venv_root.to_string_lossy().to_string());
+                        }
+                    }
+                    
+                    log::info!("Preparing Python kernel for toolchain: {}", toolchain.name);
+                    log::info!("Python path: {}", python_path);
+                    if let Some(path) = env.get("PATH") {
+                         log::info!("Kernel PATH: {}", path);
+                    } else {
+                         log::info!("Kernel PATH not set in env");
+                    }
+                    if let Some(venv) = env.get("VIRTUAL_ENV") {
+                         log::info!("Kernel VIRTUAL_ENV: {}", venv);
+                    }
 
                     let kernelspec = JupyterKernelspec {
                         argv: vec![
@@ -438,7 +466,7 @@ pub fn python_env_kernel_specifications(
                         language: "python".to_string(),
                         interrupt_mode: None,
                         metadata: None,
-                        env: None,
+                        env: Some(env),
                     };
 
                     Some(KernelSpecification::PythonEnv(PythonEnvKernelSpecification {

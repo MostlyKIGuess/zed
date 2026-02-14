@@ -116,7 +116,7 @@ impl SshRunningKernel {
                 remote_client.read(cx).build_forward_ports_command(forwards)
             })??;
 
-            let mut command = util::command::new_smol_command(&command_template.program);
+            let mut command = util::command::new_command(&command_template.program);
             command.args(&command_template.args);
             command.envs(&command_template.env);
 
