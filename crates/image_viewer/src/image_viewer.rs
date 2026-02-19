@@ -50,7 +50,7 @@ const MIN_ZOOM: f32 = 0.1;
 const MAX_ZOOM: f32 = 20.0;
 const ZOOM_STEP: f32 = 1.1;
 const SCROLL_LINE_MULTIPLIER: f32 = 20.0;
-const BASE_SQUARE_SIZE: f32 = 48.0;
+const BASE_SQUARE_SIZE: f32 = 32.0;
 
 pub struct ImageView {
     image_item: Entity<ImageItem>,
