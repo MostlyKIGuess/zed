@@ -22,6 +22,7 @@ use futures::{StreamExt, channel::oneshot, future};
 use git::GitHostingProviderRegistry;
 use git_ui::clone::clone_and_open;
 use gpui::{App, AppContext, Application, AsyncApp, Focusable as _, QuitMode, UpdateGlobal as _};
+use gpui_platform;
 
 use gpui_tokio::Tokio;
 use language::LanguageRegistry;
@@ -98,7 +99,7 @@ fn files_not_created_on_launch(errors: HashMap<io::ErrorKind, Vec<&Path>>) {
         .collect::<Vec<_>>().join("\n\n");
 
     eprintln!("{message}: {error_details}");
-    Application::new()
+    Application::with_platform(gpui_platform::current_platform(false))
         .with_quit_mode(QuitMode::Explicit)
         .run(move |cx| {
             if let Ok(window) = cx.open_window(gpui::WindowOptions::default(), |_, cx| {
@@ -297,7 +298,8 @@ fn main() {
     #[cfg(windows)]
     check_for_conpty_dll();
 
-    let app = Application::new().with_assets(Assets);
+    let app =
+        Application::with_platform(gpui_platform::current_platform(false)).with_assets(Assets);
 
     let system_id = app.background_executor().spawn(system_id());
     let installation_id = app.background_executor().spawn(installation_id());
@@ -1290,14 +1292,18 @@ pub(crate) async fn restore_or_create_workspace(
         let mut results: Vec<Result<(), Error>> = Vec::new();
         let mut tasks = Vec::new();
 
-        let mut local_results = Vec::new();
         for multi_workspace in multi_workspaces {
-            local_results
-                .push(restore_multiworkspace(multi_workspace, app_state.clone(), cx).await);
-        }
-
-        for result in local_results {
-            results.push(result.map(|_| ()));
+            match restore_multiworkspace(multi_workspace, app_state.clone(), cx).await {
+                Ok(result) => {
+                    for error in result.errors {
+                        log::error!("Failed to restore workspace in group: {error:#}");
+                        results.push(Err(error));
+                    }
+                }
+                Err(e) => {
+                    results.push(Err(e));
+                }
+            }
         }
 
         for session_workspace in remote_workspaces {
@@ -1750,23 +1756,40 @@ fn dump_all_gpui_actions() {
     struct ActionDef {
         name: &'static str,
         human_name: String,
+        schema: Option<serde_json::Value>,
         deprecated_aliases: &'static [&'static str],
+        deprecation_message: Option<&'static str>,
         documentation: Option<&'static str>,
     }
+    let mut generator = settings::KeymapFile::action_schema_generator();
     let mut actions = gpui::generate_list_of_all_registered_actions()
-        .map(|action| ActionDef {
-            name: action.name,
-            human_name: command_palette::humanize_action_name(action.name),
-            deprecated_aliases: action.deprecated_aliases,
-            documentation: action.documentation,
+        .map(|action| {
+            let schema = (action.json_schema)(&mut generator)
+                .map(|s| serde_json::to_value(s).expect("Failed to serialize action schema"));
+            ActionDef {
+                name: action.name,
+                human_name: command_palette::humanize_action_name(action.name),
+                schema,
+                deprecated_aliases: action.deprecated_aliases,
+                deprecation_message: action.deprecation_message,
+                documentation: action.documentation,
+            }
         })
         .collect::<Vec<ActionDef>>();
 
     actions.sort_by_key(|a| a.name);
 
+    let schema_definitions = serde_json::to_value(generator.definitions())
+        .expect("Failed to serialize schema definitions");
+
+    let output = serde_json::json!({
+        "actions": actions,
+        "schema_definitions": schema_definitions,
+    });
+
     io::Write::write(
         &mut std::io::stdout(),
-        serde_json::to_string_pretty(&actions).unwrap().as_bytes(),
+        serde_json::to_string_pretty(&output).unwrap().as_bytes(),
     )
     .unwrap();
 }

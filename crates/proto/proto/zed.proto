@@ -457,7 +457,7 @@ message Envelope {
         FindSearchCandidatesCancelled find_search_candidates_cancelled = 410;
         GetContextServerCommand get_context_server_command = 411;
         ContextServerCommand context_server_command = 412;
-        
+
         AllocateWorktreeId allocate_worktree_id = 413;
         AllocateWorktreeIdResponse allocate_worktree_id_response = 414;
 
@@ -471,9 +471,12 @@ message Envelope {
         GetFoldingRanges get_folding_ranges = 421;
         GetFoldingRangesResponse get_folding_ranges_response = 422;
 
-        SpawnKernel spawn_kernel = 423;
-        SpawnKernelResponse spawn_kernel_response = 424;
-        KillKernel kill_kernel = 425; // current max
+        GetRemoteProfilingData get_remote_profiling_data = 423;
+        GetRemoteProfilingDataResponse get_remote_profiling_data_response = 424;
+        
+        SpawnKernel spawn_kernel = 426;
+        SpawnKernelResponse spawn_kernel_response = 427;
+        KillKernel kill_kernel = 428; // current max
     }
 
     reserved 87 to 88;

@@ -26,6 +26,7 @@ jobs:
     - id: filter
       name: filter
       run: |
+        set -euo pipefail
         if [ -z "$GITHUB_BASE_REF" ]; then
           echo "Not in a PR context (i.e., push to main/stable/preview)"
           COMPARE_REV="$(git rev-parse HEAD~1)"
@@ -605,9 +606,8 @@ jobs:
     - name: steps::checkout_repo
       uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
       with:
+        clean: false
         fetch-depth: 0
-    - name: run_tests::check_postgres_and_protobuf_migrations::remove_untracked_files
-      run: git clean -df
     - name: run_tests::check_postgres_and_protobuf_migrations::ensure_fresh_merge
       run: |
         if [ -z "$GITHUB_BASE_REF" ];

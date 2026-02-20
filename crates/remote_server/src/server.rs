@@ -54,6 +54,7 @@ use std::{
     path::{Path, PathBuf},
     str::FromStr,
     sync::{Arc, LazyLock},
+    time::Instant,
 };
 use thiserror::Error;
 use util::{ResultExt, command::new_command};
@@ -447,7 +448,8 @@ pub fn execute_run(
 ) -> Result<()> {
     init_paths()?;
 
-    let app = gpui::Application::headless();
+    let startup_time = Instant::now();
+    let app = gpui_platform::headless();
     let pid = std::process::id();
     let id = pid.to_string();
     app.background_executor()
@@ -567,6 +569,7 @@ pub fn execute_run(
                     node_runtime,
                     languages,
                     extension_host_proxy,
+                    startup_time,
                 },
                 true,
                 cx,
