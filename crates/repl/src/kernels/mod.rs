@@ -513,7 +513,7 @@ pub fn python_env_kernel_specifications(
 
                 if let (Some(distro), Some(internal_path)) = (distro, internal_path) {
                     let python_path = format!("{}/.venv/bin/python", internal_path);
-                    let check = util::command::new_smol_command("wsl")
+                    let check = util::command::new_command("wsl")
                         .args(&["-d", distro, "test", "-f", &python_path])
                         .output()
                         .await;
@@ -540,7 +540,7 @@ pub fn python_env_kernel_specifications(
                             distro: distro.to_string(),
                         }));
                     } else {
-                        let check_system = util::command::new_smol_command("wsl")
+                        let check_system = util::command::new_command("wsl")
                             .args(&["-d", distro, "command", "-v", "python3"])
                             .output()
                             .await;

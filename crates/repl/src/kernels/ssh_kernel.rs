@@ -20,7 +20,7 @@ pub struct SshRunningKernel {
     execution_state: ExecutionState,
     kernel_info: Option<KernelInfoReply>,
     working_directory: PathBuf,
-    _ssh_tunnel_process: smol::process::Child,
+    _ssh_tunnel_process: util::command::Child,
     _local_connection_file: PathBuf,
     kernel_id: String,
     project: Entity<Project>,
