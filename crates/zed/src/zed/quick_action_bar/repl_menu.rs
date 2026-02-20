@@ -43,7 +43,7 @@ impl QuickActionBar {
             .workspace()
             .map(|workspace| {
                 let project = workspace.read(cx).project().read(cx);
-                project.is_local() || project.is_remote()
+                !project.is_via_collab()
             })
             .unwrap_or(false);
 
