@@ -81,15 +81,15 @@ pub fn init(cx: &mut App) {
             cx.defer_in(window, |editor, _window, cx| {
                 let project = editor.project().cloned();
 
-                let is_local_or_ssh_remote = project
+                let is_valid_project = project
                     .as_ref()
                     .map(|project| {
                         let p = project.read(cx);
-                        p.is_local() || p.is_remote()
+                        !p.is_via_collab()
                     })
                     .unwrap_or(false);
 
-                if !is_local_or_ssh_remote {
+                if !is_valid_project {
                     return;
                 }
 
