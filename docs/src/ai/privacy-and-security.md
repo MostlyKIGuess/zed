@@ -1,3 +1,8 @@
+---
+title: AI Privacy and Security - Zed
+description: Zed's approach to AI privacy: opt-in data sharing by default, zero-data retention with providers, and full open-source transparency.
+---
+
 # Privacy and Security
 
 ## Philosophy
@@ -22,7 +27,7 @@ Zed, including AI features, works without sharing data with us and without authe
 
 - [Accounts](../authentication.md): When and why you'd need to authenticate into Zed, how to do so, and what scope we need from you.
 
-- [Collab](https://zed.dev/faq#data-and-privacy): How Zed's live collaboration works, and how data flows to provide the experience (we don't store your code!).
+- [Collab](https://zed.dev/faq#data-and-privacy): How Zed's live collaboration works, and how data flows to provide the experience (we don't store your code).
 
 ## Legal Links
 

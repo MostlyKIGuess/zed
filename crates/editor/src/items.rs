@@ -757,7 +757,7 @@ impl Item for Editor {
     ) {
         self.buffer
             .read(cx)
-            .for_each_buffer(|buffer| f(buffer.entity_id(), buffer.read(cx)));
+            .for_each_buffer(&mut |buffer| f(buffer.entity_id(), buffer.read(cx)));
     }
 
     fn buffer_kind(&self, cx: &App) -> ItemBufferKind {
@@ -1004,7 +1004,7 @@ impl Item for Editor {
         }
     }
 
-    fn to_item_events(event: &EditorEvent, mut f: impl FnMut(ItemEvent)) {
+    fn to_item_events(event: &EditorEvent, f: &mut dyn FnMut(ItemEvent)) {
         match event {
             EditorEvent::Saved | EditorEvent::TitleChanged => {
                 f(ItemEvent::UpdateTab);
@@ -1421,7 +1421,7 @@ impl ProjectItem for Editor {
             }
             let (top_row, offset) = restoration_data.scroll_position;
             let anchor =
-                Anchor::in_buffer(*excerpt_id, snapshot.anchor_before(Point::new(top_row, 0)));
+                Anchor::in_buffer(excerpt_id, snapshot.anchor_before(Point::new(top_row, 0)));
             editor.set_scroll_anchor(ScrollAnchor { anchor, offset }, window, cx);
         }
 
@@ -2017,6 +2017,7 @@ fn restore_serialized_buffer_contents(
 mod tests {
     use crate::editor_tests::init_test;
     use fs::Fs;
+    use workspace::MultiWorkspace;
 
     use super::*;
     use fs::MTime;
@@ -2071,8 +2072,10 @@ mod tests {
         // Test case 1: Deserialize with path and contents
         {
             let project = Project::test(fs.clone(), [path!("/file.rs").as_ref()], cx).await;
-            let (workspace, cx) =
-                cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+            let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+                MultiWorkspace::test_new(project.clone(), window, cx)
+            });
+            let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
             let workspace_id = workspace::WORKSPACE_DB.next_id().await.unwrap();
             let item_id = 1234 as ItemId;
             let mtime = fs
@@ -2108,8 +2111,10 @@ mod tests {
         // Test case 2: Deserialize with only path
         {
             let project = Project::test(fs.clone(), [path!("/file.rs").as_ref()], cx).await;
-            let (workspace, cx) =
-                cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+            let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+                MultiWorkspace::test_new(project.clone(), window, cx)
+            });
+            let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
 
             let workspace_id = workspace::WORKSPACE_DB.next_id().await.unwrap();
 
@@ -2146,8 +2151,10 @@ mod tests {
                 project.languages().add(languages::rust_lang())
             });
 
-            let (workspace, cx) =
-                cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+            let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+                MultiWorkspace::test_new(project.clone(), window, cx)
+            });
+            let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
 
             let workspace_id = workspace::WORKSPACE_DB.next_id().await.unwrap();
 
@@ -2182,8 +2189,10 @@ mod tests {
         // Test case 4: Deserialize with path, content, and old mtime
         {
             let project = Project::test(fs.clone(), [path!("/file.rs").as_ref()], cx).await;
-            let (workspace, cx) =
-                cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+            let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+                MultiWorkspace::test_new(project.clone(), window, cx)
+            });
+            let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
 
             let workspace_id = workspace::WORKSPACE_DB.next_id().await.unwrap();
 
@@ -2212,8 +2221,10 @@ mod tests {
         // Test case 5: Deserialize with no path, no content, no language, and no old mtime (new, empty, unsaved buffer)
         {
             let project = Project::test(fs.clone(), [path!("/file.rs").as_ref()], cx).await;
-            let (workspace, cx) =
-                cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+            let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+                MultiWorkspace::test_new(project.clone(), window, cx)
+            });
+            let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
 
             let workspace_id = workspace::WORKSPACE_DB.next_id().await.unwrap();
 
@@ -2252,8 +2263,10 @@ mod tests {
 
             // Create an empty project with no worktrees
             let project = Project::test(fs.clone(), [], cx).await;
-            let (workspace, cx) =
-                cx.add_window_view(|window, cx| Workspace::test_new(project.clone(), window, cx));
+            let (multi_workspace, cx) = cx.add_window_view(|window, cx| {
+                MultiWorkspace::test_new(project.clone(), window, cx)
+            });
+            let workspace = multi_workspace.read_with(cx, |mw, _| mw.workspace().clone());
 
             let workspace_id = workspace::WORKSPACE_DB.next_id().await.unwrap();
             let item_id = 11000 as ItemId;
