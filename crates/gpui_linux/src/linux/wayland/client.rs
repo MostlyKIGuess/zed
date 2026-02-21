@@ -1949,7 +1949,7 @@ impl Dispatch<zwp_pointer_gesture_pinch_v1::ZwpPointerGesturePinchV1, ()>
         _: &Connection,
         _: &QueueHandle<Self>,
     ) {
-        use crate::PinchEvent;
+        use gpui::PinchEvent;
 
         let client = this.get_client();
         let mut state = client.borrow_mut();
