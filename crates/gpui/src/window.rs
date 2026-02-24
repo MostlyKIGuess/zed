@@ -3348,6 +3348,7 @@ impl Window {
                 order: 0,
                 pad: 0,
                 grayscale: false,
+                nearest_neighbor: false,
                 bounds,
                 corner_radii: Default::default(),
                 content_mask,
@@ -3434,6 +3435,7 @@ impl Window {
         data: Arc<RenderImage>,
         frame_index: usize,
         grayscale: bool,
+        nearest_neighbor: bool,
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
@@ -3464,6 +3466,7 @@ impl Window {
             order: 0,
             pad: 0,
             grayscale,
+            nearest_neighbor,
             bounds: bounds
                 .map_origin(|origin| origin.floor())
                 .map_size(|size| size.ceil()),

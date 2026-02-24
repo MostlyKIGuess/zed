@@ -98,6 +98,7 @@ pub struct WgpuRenderer {
     bind_group_layouts: WgpuBindGroupLayouts,
     atlas: Arc<WgpuAtlas>,
     atlas_sampler: wgpu::Sampler,
+    nearest_sampler: wgpu::Sampler,
     globals_buffer: wgpu::Buffer,
     path_globals_offset: u64,
     gamma_offset: u64,
@@ -224,6 +225,12 @@ impl WgpuRenderer {
             min_filter: wgpu::FilterMode::Linear,
             ..Default::default()
         });
+        let nearest_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("nearest_sampler"),
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
 
         let uniform_alignment = device.limits().min_uniform_buffer_offset_alignment as u64;
         let globals_size = std::mem::size_of::<GlobalParams>() as u64;
@@ -321,6 +328,7 @@ impl WgpuRenderer {
             bind_group_layouts,
             atlas,
             atlas_sampler,
+            nearest_sampler,
             globals_buffer,
             path_globals_offset,
             gamma_offset,
@@ -974,13 +982,17 @@ impl WgpuRenderer {
                                 &mut instance_offset,
                                 &mut pass,
                             ),
-                        PrimitiveBatch::PolychromeSprites { texture_id, range } => self
-                            .draw_polychrome_sprites(
-                                &scene.polychrome_sprites[range],
-                                texture_id,
-                                &mut instance_offset,
-                                &mut pass,
-                            ),
+                        PrimitiveBatch::PolychromeSprites {
+                            texture_id,
+                            nearest_neighbor,
+                            range,
+                        } => self.draw_polychrome_sprites(
+                            &scene.polychrome_sprites[range],
+                            texture_id,
+                            nearest_neighbor,
+                            &mut instance_offset,
+                            &mut pass,
+                        ),
                         PrimitiveBatch::Surfaces(_surfaces) => {
                             // Surfaces are macOS-only for video playback
                             // Not implemented for Linux/wgpu
@@ -1109,15 +1121,22 @@ impl WgpuRenderer {
         &self,
         sprites: &[PolychromeSprite],
         texture_id: AtlasTextureId,
+        nearest_neighbor: bool,
         instance_offset: &mut u64,
         pass: &mut wgpu::RenderPass<'_>,
     ) -> bool {
         let tex_info = self.atlas.get_texture_info(texture_id);
         let data = unsafe { Self::instance_bytes(sprites) };
-        self.draw_instances_with_texture(
+        let sampler = if nearest_neighbor {
+            &self.nearest_sampler
+        } else {
+            &self.atlas_sampler
+        };
+        self.draw_instances_with_sampler_and_texture(
             data,
             sprites.len() as u32,
             &tex_info.view,
+            sampler,
             &self.pipelines.poly_sprites,
             instance_offset,
             pass,
@@ -1162,6 +1181,27 @@ impl WgpuRenderer {
         instance_offset: &mut u64,
         pass: &mut wgpu::RenderPass<'_>,
     ) -> bool {
+        self.draw_instances_with_sampler_and_texture(
+            data,
+            instance_count,
+            texture_view,
+            &self.atlas_sampler,
+            pipeline,
+            instance_offset,
+            pass,
+        )
+    }
+
+    fn draw_instances_with_sampler_and_texture(
+        &self,
+        data: &[u8],
+        instance_count: u32,
+        texture_view: &wgpu::TextureView,
+        sampler: &wgpu::Sampler,
+        pipeline: &wgpu::RenderPipeline,
+        instance_offset: &mut u64,
+        pass: &mut wgpu::RenderPass<'_>,
+    ) -> bool {
         if instance_count == 0 {
             return true;
         }
@@ -1182,7 +1222,7 @@ impl WgpuRenderer {
                 },
                 wgpu::BindGroupEntry {
                     binding: 2,
-                    resource: wgpu::BindingResource::Sampler(&self.atlas_sampler),
+                    resource: wgpu::BindingResource::Sampler(sampler),
                 },
             ],
         });

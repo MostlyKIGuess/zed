@@ -10,8 +10,8 @@ use gpui::{
     AnyElement, App, Bounds, Context, DispatchPhase, Element, ElementId, Entity, EventEmitter,
     FocusHandle, Focusable, GlobalElementId, InspectorElementId, InteractiveElement, IntoElement,
     LayoutId, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
-    Point, Render, ScrollDelta, ScrollWheelEvent, Style, Styled, Task, WeakEntity, Window, actions,
-    canvas, div, img, opaque_grey, point, px, size,
+    Point, Render, ScrollDelta, ScrollWheelEvent, Style, Styled, StyledImage, Task, WeakEntity,
+    Window, actions, canvas, div, img, opaque_grey, point, px, size,
 };
 use language::File as _;
 use persistence::IMAGE_VIEWER;
@@ -427,8 +427,13 @@ impl Element for ImageContentElement {
                         .bg(gpui::rgb(0xCCCCCD)),
                     )
                     .child({
+                        let nearest = matches!(
+                            ImageViewerSettings::get_global(cx).image_smoothing,
+                            ImageSmoothing::Nearest,
+                        );
                         img(image)
                             .id(("image-viewer-image", self.image_view.entity_id()))
+                            .nearest_neighbor(nearest)
                             .size_full()
                     }),
             )
