@@ -155,6 +155,7 @@ pub trait StyledImage: Sized {
         self
     }
 
+    /// Set the image to use nearest-neighbor interpolation
     fn nearest_neighbor(mut self, nearest_neighbor: bool) -> Self {
         self.image_style().nearest_neighbor = nearest_neighbor;
         self
