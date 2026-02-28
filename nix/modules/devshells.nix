@@ -11,6 +11,8 @@
       rustBin = inputs.rust-overlay.lib.mkRustBin { } pkgs;
       rustToolchain = rustBin.fromRustupToolchainFile ../../rust-toolchain.toml;
 
+      rustToolchainWeb = rustBin.fromRustupToolchainFile ../../crates/gpui_web/examples/hello_web/rust-toolchain.toml;
+
       baseEnv =
         (zed-editor.overrideAttrs (attrs: {
           passthru.env = attrs.env;
@@ -70,6 +72,15 @@
             # For aws-lc-sys musl cross-compilation
             CC_x86_64_unknown_linux_musl = "${muslCross.stdenv.cc}/bin/x86_64-unknown-linux-musl-gcc";
           };
+      };
+
+      devShells.web = pkgs.mkShell {
+        name = "gpui-web-dev";
+
+        packages = [
+          rustToolchainWeb
+          pkgs.trunk
+        ];
       };
     };
 }
