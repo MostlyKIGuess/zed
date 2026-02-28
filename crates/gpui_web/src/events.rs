@@ -339,7 +339,11 @@ impl WebWindowInner {
             }
 
             let is_clipboard_combo = matches!(key.as_str(), "v" | "c" | "x")
-                && if this.is_mac { modifiers.platform } else { modifiers.control };
+                && if this.is_mac {
+                    modifiers.platform
+                } else {
+                    modifiers.control
+                };
             if !is_clipboard_combo {
                 event.prevent_default();
             }

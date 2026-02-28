@@ -81,15 +81,17 @@ impl WebPlatform {
 
         let paste_closure = {
             let clipboard = Rc::clone(&clipboard);
-            Closure::<dyn FnMut(web_sys::ClipboardEvent)>::new(move |event: web_sys::ClipboardEvent| {
-                if let Some(data_transfer) = event.clipboard_data() {
-                    if let Ok(text) = data_transfer.get_data("text/plain") {
-                        if !text.is_empty() {
-                            *clipboard.borrow_mut() = Some(ClipboardItem::new_string(text));
+            Closure::<dyn FnMut(web_sys::ClipboardEvent)>::new(
+                move |event: web_sys::ClipboardEvent| {
+                    if let Some(data_transfer) = event.clipboard_data() {
+                        if let Ok(text) = data_transfer.get_data("text/plain") {
+                            if !text.is_empty() {
+                                *clipboard.borrow_mut() = Some(ClipboardItem::new_string(text));
+                            }
                         }
                     }
-                }
-            })
+                },
+            )
         };
 
         {
