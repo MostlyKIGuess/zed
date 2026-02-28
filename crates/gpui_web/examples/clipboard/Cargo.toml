@@ -1,0 +1,15 @@
+[workspace]
+
+[package]
+name = "clipboard_web"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[[bin]]
+name = "clipboard_web"
+path = "main.rs"
+
+[dependencies]
+gpui = { path = "../../../gpui" }
+gpui_platform = { path = "../../../gpui_platform" }
