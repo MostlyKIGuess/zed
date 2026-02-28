@@ -338,7 +338,11 @@ impl WebWindowInner {
                 return;
             }
 
-            event.prevent_default();
+            let is_clipboard_combo = matches!(key.as_str(), "v" | "c" | "x")
+                && if this.is_mac { modifiers.platform } else { modifiers.control };
+            if !is_clipboard_combo {
+                event.prevent_default();
+            }
 
             let is_held = event.repeat();
             let key_char = compute_key_char(&event, &key, &modifiers);

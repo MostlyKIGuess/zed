@@ -18,6 +18,7 @@ use std::{
     rc::Rc,
     sync::Arc,
 };
+use wasm_bindgen::prelude::*;
 
 static BUNDLED_FONTS: &[&[u8]] = &[
     include_bytes!("../../../assets/fonts/ibm-plex-sans/IBMPlexSans-Regular.ttf"),
@@ -39,6 +40,8 @@ pub struct WebPlatform {
     active_display: Rc<dyn PlatformDisplay>,
     callbacks: RefCell<WebPlatformCallbacks>,
     wgpu_context: Rc<RefCell<Option<WgpuContext>>>,
+    clipboard: Rc<RefCell<Option<ClipboardItem>>>,
+    _paste_closure: Closure<dyn FnMut(web_sys::ClipboardEvent)>,
 }
 
 #[derive(Default)]
@@ -74,6 +77,36 @@ impl WebPlatform {
         let active_display: Rc<dyn PlatformDisplay> =
             Rc::new(WebDisplay::new(browser_window.clone()));
 
+        let clipboard: Rc<RefCell<Option<ClipboardItem>>> = Rc::new(RefCell::new(None));
+
+        let paste_closure = {
+            let clipboard = Rc::clone(&clipboard);
+            Closure::<dyn FnMut(web_sys::ClipboardEvent)>::new(move |event: web_sys::ClipboardEvent| {
+                if let Some(data_transfer) = event.clipboard_data() {
+                    if let Ok(text) = data_transfer.get_data("text/plain") {
+                        if !text.is_empty() {
+                            *clipboard.borrow_mut() = Some(ClipboardItem::new_string(text));
+                        }
+                    }
+                }
+            })
+        };
+
+        {
+            let options = js_sys::Object::new();
+            js_sys::Reflect::set(&options, &"capture".into(), &true.into()).ok();
+            js_sys::Reflect::set(&options, &"passive".into(), &true.into()).ok();
+            let window_js: &JsValue = browser_window.as_ref();
+            let callback_js: &JsValue = paste_closure.as_ref();
+            if let Ok(add_fn_val) = js_sys::Reflect::get(window_js, &"addEventListener".into()) {
+                if let Ok(add_fn) = add_fn_val.dyn_into::<js_sys::Function>() {
+                    add_fn
+                        .call3(window_js, &"paste".into(), callback_js, &options)
+                        .ok();
+                }
+            }
+        }
+
         Self {
             browser_window,
             background_executor,
@@ -83,6 +116,8 @@ impl WebPlatform {
             active_display,
             callbacks: RefCell::new(WebPlatformCallbacks::default()),
             wgpu_context: Rc::new(RefCell::new(None)),
+            clipboard,
+            _paste_closure: paste_closure,
         }
     }
 }
@@ -306,10 +341,23 @@ impl Platform for WebPlatform {
     }
 
     fn read_from_clipboard(&self) -> Option<ClipboardItem> {
-        None
+        self.clipboard.borrow().clone()
     }
 
-    fn write_to_clipboard(&self, _item: ClipboardItem) {}
+    fn write_to_clipboard(&self, item: ClipboardItem) {
+        *self.clipboard.borrow_mut() = Some(item.clone());
+
+        if let Some(text) = item.text() {
+            let navigator = self.browser_window.navigator();
+            let clipboard = navigator.clipboard();
+            let promise = clipboard.write_text(&text);
+            wasm_bindgen_futures::spawn_local(async move {
+                if let Err(error) = wasm_bindgen_futures::JsFuture::from(promise).await {
+                    log::warn!("Failed to write to browser clipboard: {error:?}");
+                }
+            });
+        }
+    }
 
     fn write_credentials(&self, _url: &str, _username: &str, _password: &[u8]) -> Task<Result<()>> {
         Task::ready(Err(anyhow::anyhow!(
