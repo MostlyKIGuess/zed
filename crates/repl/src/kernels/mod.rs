@@ -348,7 +348,6 @@ pub fn python_env_kernel_specifications(
 ) -> impl Future<Output = Result<Vec<KernelSpecification>>> + use<> {
     let python_language = LanguageName::new_static("Python");
     let is_remote = project.read(cx).is_remote();
-    log::info!("python_env_kernel_specifications: is_remote: {}", is_remote);
 
     let toolchains = project.read(cx).available_toolchains(
         ProjectPath {
@@ -390,7 +389,7 @@ pub fn python_env_kernel_specifications(
                     // `new_smol_command` runs locally. We need to run remotely if `is_remote`.
 
                     if is_remote {
-                        log::info!(
+                        log::debug!(
                             "python_env_kernel_specifications: returning SshRemote for toolchain {}",
                             toolchain.name
                         );
