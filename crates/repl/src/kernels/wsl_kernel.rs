@@ -178,49 +178,57 @@ impl WslRunningKernel {
                 cmd.arg("--cd").arg(wd);
             }
 
-            // Build the command to run inside WSL
-            // We use bash -lc to run in a login shell for proper environment setup
-            let mut kernel_args: Vec<String> = Vec::new();
-
-            if let Some(env) = &kernel_specification.kernelspec.env {
+            // Build env export prefix from kernel.json env field
+            let env_prefix = if let Some(env) = &kernel_specification.kernelspec.env {
                 if !env.is_empty() {
-                    kernel_args.push("env".to_string());
-                    for (k, v) in env {
-                        kernel_args.push(format!("{}={}", k, v));
-                    }
-                }
-            }
-
-            for arg in argv {
-                if arg == "{connection_file}" {
-                    kernel_args.push(wsl_connection_path.clone());
+                    let exports: Vec<String> = env
+                        .iter()
+                        .map(|(k, v)| {
+                            format!(
+                                "export {}='{}'",
+                                k,
+                                v.replace('\'', "'\\''")
+                            )
+                        })
+                        .collect();
+                    format!("{}; ", exports.join("; "))
                 } else {
-                    kernel_args.push(arg.clone());
+                    String::new()
                 }
-            }
+            } else {
+                String::new()
+            };
 
-            // because first command is python/python3 we need make sure it's present in the env
-            let first_cmd = kernel_args.first().map(|arg| {
-                arg.split_whitespace().next().unwrap_or(arg)
+            let kernel_args: Vec<String> = argv
+                .iter()
+                .map(|arg| {
+                    if arg == "{connection_file}" {
+                        wsl_connection_path.clone()
+                    } else {
+                        arg.clone()
+                    }
+                })
+                .collect();
+
+            let first_cmd = kernel_args.first().map(String::as_str);
+
+            let is_python_kernel = first_cmd.is_some_and(|cmd| {
+                cmd == "python" || cmd == "python3"
             });
 
-            let needs_python_resolution = first_cmd.map_or(false, |cmd| {
-                cmd == "python" || cmd == "python3" || !cmd.starts_with('/')
-            });
+            let shell_escape = |arg: &str| -> String {
+                if arg.contains(' ') || arg.contains('\'') || arg.contains('"') {
+                    format!("'{}'", arg.replace('\'', "'\\''"))
+                } else {
+                    arg.to_string()
+                }
+            };
 
-            let shell_command = if needs_python_resolution {
-                // 1. Check for .venv/bin/python or .venv/bin/python3 in working directory
-                // 2. Fall back to system python3 or python
-                let rest_args: Vec<String> = kernel_args.iter().skip(1).cloned().collect();
-                let rest_string = rest_args
+            let shell_command = if is_python_kernel {
+                let rest_string = kernel_args
                     .iter()
-                    .map(|arg| {
-                        if arg.contains(' ') || arg.contains('\'') || arg.contains('"') {
-                            format!("'{}'", arg.replace('\'', "'\\''"))
-                        } else {
-                            arg.clone()
-                        }
-                    })
+                    .skip(1)
+                    .map(|arg| shell_escape(arg))
                     .collect::<Vec<_>>()
                     .join(" ");
 
@@ -229,24 +237,23 @@ impl WslRunningKernel {
                 } else {
                     String::new()
                 };
-                // TODO: find a better way to debug missing python issues in WSL
 
                 format!(
-                    "set -e; \
-                     {} \
+                    "{env_prefix}set -e; \
+                     {cd_command} \
                      echo \"Working directory: $(pwd)\" >&2; \
                      if [ -x .venv/bin/python ]; then \
                        echo \"Found .venv/bin/python\" >&2; \
-                       exec .venv/bin/python {}; \
+                       exec .venv/bin/python {rest_string}; \
                      elif [ -x .venv/bin/python3 ]; then \
                        echo \"Found .venv/bin/python3\" >&2; \
-                       exec .venv/bin/python3 {}; \
+                       exec .venv/bin/python3 {rest_string}; \
                      elif command -v python3 >/dev/null 2>&1; then \
                        echo \"Found system python3\" >&2; \
-                       exec python3 {}; \
+                       exec python3 {rest_string}; \
                      elif command -v python >/dev/null 2>&1; then \
                        echo \"Found system python\" >&2; \
-                       exec python {}; \
+                       exec python {rest_string}; \
                      else \
                        echo 'Error: Python not found in .venv or PATH' >&2; \
                        echo 'Contents of current directory:' >&2; \
@@ -254,20 +261,15 @@ impl WslRunningKernel {
                        echo 'PATH:' \"$PATH\" >&2; \
                        exit 127; \
                      fi",
-                    cd_command, rest_string, rest_string, rest_string, rest_string
                 )
             } else {
-                kernel_args
+                let args_string = kernel_args
                     .iter()
-                    .map(|arg| {
-                        if arg.contains(' ') || arg.contains('\'') || arg.contains('"') {
-                            format!("'{}'", arg.replace('\'', "'\\''"))
-                        } else {
-                            arg.clone()
-                        }
-                    })
+                    .map(|arg| shell_escape(arg))
                     .collect::<Vec<_>>()
-                    .join(" ")
+                    .join(" ");
+
+                format!("{env_prefix}exec {args_string}")
             };
 
             cmd.arg("bash")
