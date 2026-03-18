@@ -5,6 +5,7 @@ mod remote_servers;
 mod ssh_config;
 
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -547,6 +548,7 @@ impl RecentProjects {
                 create_new_window,
                 focus_handle,
                 open_folders,
+                HashSet::new(),
                 project_connection_options,
                 ProjectPickerStyle::Modal,
             );
@@ -557,6 +559,7 @@ impl RecentProjects {
 
     pub fn popover(
         workspace: WeakEntity<Workspace>,
+        excluded_workspace_ids: HashSet<WorkspaceId>,
         create_new_window: bool,
         focus_handle: FocusHandle,
         window: &mut Window,
@@ -580,6 +583,7 @@ impl RecentProjects {
                 create_new_window,
                 focus_handle,
                 open_folders,
+                excluded_workspace_ids,
                 project_connection_options,
                 ProjectPickerStyle::Popover,
             );
@@ -627,6 +631,7 @@ impl Render for RecentProjects {
 pub struct RecentProjectsDelegate {
     workspace: WeakEntity<Workspace>,
     open_folders: Vec<OpenFolderEntry>,
+    excluded_workspace_ids: HashSet<WorkspaceId>,
     workspaces: Vec<(
         WorkspaceId,
         SerializedWorkspaceLocation,
@@ -652,6 +657,7 @@ impl RecentProjectsDelegate {
         create_new_window: bool,
         focus_handle: FocusHandle,
         open_folders: Vec<OpenFolderEntry>,
+        excluded_workspace_ids: HashSet<WorkspaceId>,
         project_connection_options: Option<RemoteConnectionOptions>,
         style: ProjectPickerStyle,
     ) -> Self {
@@ -659,6 +665,7 @@ impl RecentProjectsDelegate {
         Self {
             workspace,
             open_folders,
+            excluded_workspace_ids,
             workspaces: Vec::new(),
             filtered_entries: Vec::new(),
             selected_index: 0,
@@ -705,32 +712,14 @@ impl PickerDelegate for RecentProjectsDelegate {
         window: &mut Window,
         cx: &mut Context<Picker<Self>>,
     ) -> Div {
-        let focus_handle = self.focus_handle.clone();
-
         h_flex()
             .flex_none()
             .h_9()
-            .pl_2p5()
-            .pr_1p5()
+            .px_2p5()
             .justify_between()
             .border_b_1()
             .border_color(cx.theme().colors().border_variant)
             .child(editor.render(window, cx))
-            .child(
-                IconButton::new("add_folder", IconName::Plus)
-                    .icon_size(IconSize::Small)
-                    .tooltip(move |_, cx| {
-                        Tooltip::for_action_in(
-                            "Add Project to Workspace",
-                            &workspace::AddFolderToProject,
-                            &focus_handle,
-                            cx,
-                        )
-                    })
-                    .on_click(|_, window, cx| {
-                        window.dispatch_action(workspace::AddFolderToProject.boxed_clone(), cx)
-                    }),
-            )
     }
 
     fn match_count(&self) -> usize {
@@ -1115,12 +1104,21 @@ impl PickerDelegate for RecentProjectsDelegate {
                 let (_, location, paths, _) = self.workspaces.get(hit.candidate_id)?;
                 let is_local = matches!(location, SerializedWorkspaceLocation::Local);
                 let paths_to_add = paths.paths().to_vec();
-                let tooltip_path: SharedString = paths
+                let ordered_paths: Vec<_> = paths
                     .ordered_paths()
                     .map(|p| p.compact().to_string_lossy().to_string())
-                    .collect::<Vec<_>>()
-                    .join("\n")
-                    .into();
+                    .collect();
+                let tooltip_path: SharedString = match &location {
+                    SerializedWorkspaceLocation::Remote(options) => {
+                        let host = options.display_name();
+                        if ordered_paths.len() == 1 {
+                            format!("{} ({})", ordered_paths[0], host).into()
+                        } else {
+                            format!("{}\n({})", ordered_paths.join("\n"), host).into()
+                        }
+                    }
+                    _ => ordered_paths.join("\n").into(),
+                };
 
                 let mut path_start_offset = 0;
                 let (match_labels, paths): (Vec<_>, Vec<_>) = paths
@@ -1153,9 +1151,9 @@ impl PickerDelegate for RecentProjectsDelegate {
                     .gap_px()
                     .when(is_local, |this| {
                         this.child(
-                            IconButton::new("add_to_workspace", IconName::Plus)
+                            IconButton::new("add_to_workspace", IconName::FolderPlus)
                                 .icon_size(IconSize::Small)
-                                .tooltip(Tooltip::text("Add Project to Workspace"))
+                                .tooltip(Tooltip::text("Add Project to this Workspace"))
                                 .on_click({
                                     let paths_to_add = paths_to_add.clone();
                                     cx.listener(move |picker, _event, window, cx| {
@@ -1537,6 +1535,10 @@ impl RecentProjectsDelegate {
         workspace_id: WorkspaceId,
         cx: &mut Context<Picker<Self>>,
     ) -> bool {
+        if self.excluded_workspace_ids.contains(&workspace_id) {
+            return true;
+        }
+
         if let Some(workspace) = self.workspace.upgrade() {
             let workspace = workspace.read(cx);
             if Some(workspace_id) == workspace.database_id() {

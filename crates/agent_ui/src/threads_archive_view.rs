@@ -7,7 +7,7 @@ use crate::{
 use acp_thread::AgentSessionInfo;
 use agent::ThreadStore;
 use agent_client_protocol as acp;
-use chrono::{Datelike as _, Local, NaiveDate, TimeDelta, Utc};
+use chrono::{DateTime, Datelike as _, Local, NaiveDate, TimeDelta, Utc};
 use editor::Editor;
 use fs::Fs;
 use gpui::{
@@ -16,11 +16,12 @@ use gpui::{
 };
 use itertools::Itertools as _;
 use menu::{Confirm, SelectFirst, SelectLast, SelectNext, SelectPrevious};
-use project::{AgentServerStore, ExternalAgentServerName};
+use project::{AgentId, AgentServerStore};
 use theme::ActiveTheme;
 use ui::{
     ButtonLike, CommonAnimationExt, ContextMenu, ContextMenuEntry, HighlightedLabel, ListItem,
     PopoverMenu, PopoverMenuHandle, Tab, TintColor, Tooltip, WithScrollbar, prelude::*,
+    utils::platform_title_bar_height,
 };
 use util::ResultExt as _;
 use zed_actions::editor::{MoveDown, MoveUp};
@@ -88,6 +89,22 @@ fn fuzzy_match_positions(query: &str, text: &str) -> Option<Vec<usize>> {
         Some(positions)
     } else {
         None
+    }
+}
+
+fn archive_empty_state_message(
+    has_history: bool,
+    is_empty: bool,
+    has_query: bool,
+) -> Option<&'static str> {
+    if !is_empty {
+        None
+    } else if !has_history {
+        Some("This agent does not support viewing archived threads.")
+    } else if has_query {
+        Some("No threads match your search.")
+    } else {
+        Some("No archived threads yet.")
     }
 }
 
@@ -171,6 +188,7 @@ impl ThreadsArchiveView {
     fn set_selected_agent(&mut self, agent: Agent, window: &mut Window, cx: &mut Context<Self>) {
         self.selected_agent = agent.clone();
         self.is_loading = true;
+        self.reset_history_subscription();
         self.history = None;
         self.items.clear();
         self.selection = None;
@@ -193,25 +211,33 @@ impl ThreadsArchiveView {
         cx.notify();
     }
 
-    fn set_history(&mut self, history: Entity<ThreadHistory>, cx: &mut Context<Self>) {
-        self._history_subscription = cx.observe(&history, |this, _, cx| {
-            this.update_items(cx);
-        });
-        history.update(cx, |history, cx| {
-            history.refresh_full_history(cx);
-        });
-        self.history = Some(history);
+    fn reset_history_subscription(&mut self) {
+        self._history_subscription = Subscription::new(|| {});
+    }
+
+    fn set_history(&mut self, history: Option<Entity<ThreadHistory>>, cx: &mut Context<Self>) {
+        self.reset_history_subscription();
+
+        if let Some(history) = &history {
+            self._history_subscription = cx.observe(history, |this, _, cx| {
+                this.update_items(cx);
+            });
+            history.update(cx, |history, cx| {
+                history.refresh_full_history(cx);
+            });
+        }
+        self.history = history;
         self.is_loading = false;
         self.update_items(cx);
         cx.notify();
     }
 
     fn update_items(&mut self, cx: &mut Context<Self>) {
-        let Some(history) = self.history.as_ref() else {
-            return;
-        };
-
-        let sessions = history.read(cx).sessions().to_vec();
+        let sessions = self
+            .history
+            .as_ref()
+            .map(|h| h.read(cx).sessions().to_vec())
+            .unwrap_or_default();
         let query = self.filter_editor.read(cx).text(cx).to_lowercase();
         let today = Local::now().naive_local().date();
 
@@ -427,26 +453,10 @@ impl ThreadsArchiveView {
                 let focus_handle = self.focus_handle.clone();
                 let highlight_positions = highlight_positions.clone();
 
-                let timestamp = session.created_at.or(session.updated_at).map(|entry_time| {
-                    let now = Utc::now();
-                    let duration = now.signed_duration_since(entry_time);
-
-                    let minutes = duration.num_minutes();
-                    let hours = duration.num_hours();
-                    let days = duration.num_days();
-                    let weeks = days / 7;
-                    let months = days / 30;
-
-                    if minutes < 60 {
-                        format!("{}m", minutes.max(1))
-                    } else if hours < 24 {
-                        format!("{}h", hours)
-                    } else if weeks < 4 {
-                        format!("{}w", weeks.max(1))
-                    } else {
-                        format!("{}mo", months.max(1))
-                    }
-                });
+                let timestamp = session
+                    .created_at
+                    .or(session.updated_at)
+                    .map(format_history_entry_timestamp);
 
                 let id = SharedString::from(format!("archive-entry-{}", ix));
 
@@ -530,9 +540,9 @@ impl ThreadsArchiveView {
             (IconName::ChevronDown, Color::Muted)
         };
 
-        let selected_agent_icon = if let Agent::Custom { name } = &self.selected_agent {
+        let selected_agent_icon = if let Agent::Custom { id } = &self.selected_agent {
             let store = agent_server_store.read(cx);
-            let icon = store.agent_icon(&ExternalAgentServerName(name.clone()));
+            let icon = store.agent_icon(&id);
 
             if let Some(icon) = icon {
                 Icon::from_external_svg(icon)
@@ -584,24 +594,24 @@ impl ThreadsArchiveView {
                         let registry_store_ref = registry_store.as_ref().map(|s| s.read(cx));
 
                         struct AgentMenuItem {
-                            id: ExternalAgentServerName,
+                            id: AgentId,
                             display_name: SharedString,
                         }
 
                         let agent_items = agent_server_store
                             .external_agents()
-                            .map(|name| {
+                            .map(|agent_id| {
                                 let display_name = agent_server_store
-                                    .agent_display_name(name)
+                                    .agent_display_name(agent_id)
                                     .or_else(|| {
                                         registry_store_ref
                                             .as_ref()
-                                            .and_then(|store| store.agent(name.0.as_ref()))
+                                            .and_then(|store| store.agent(agent_id))
                                             .map(|a| a.name().clone())
                                     })
-                                    .unwrap_or_else(|| name.0.clone());
+                                    .unwrap_or_else(|| agent_id.0.clone());
                                 AgentMenuItem {
-                                    id: name.clone(),
+                                    id: agent_id.clone(),
                                     display_name,
                                 }
                             })
@@ -614,7 +624,7 @@ impl ThreadsArchiveView {
                             let icon_path = agent_server_store.agent_icon(&item.id).or_else(|| {
                                 registry_store_ref
                                     .as_ref()
-                                    .and_then(|store| store.agent(item.id.0.as_str()))
+                                    .and_then(|store| store.agent(&item.id))
                                     .and_then(|a| a.icon_path().cloned())
                             });
 
@@ -627,7 +637,7 @@ impl ThreadsArchiveView {
                             entry = entry.icon_color(Color::Muted).handler({
                                 let this = this.clone();
                                 let agent = Agent::Custom {
-                                    name: item.id.0.clone(),
+                                    id: item.id.clone(),
                                 };
                                 move |window, cx| {
                                     this.update(cx, |this, cx| {
@@ -651,32 +661,56 @@ impl ThreadsArchiveView {
             })
     }
 
-    fn render_header(&self, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render_header(&self, window: &Window, cx: &mut Context<Self>) -> impl IntoElement {
         let has_query = !self.filter_editor.read(cx).text(cx).is_empty();
+        let traffic_lights = cfg!(target_os = "macos") && !window.is_fullscreen();
+        let header_height = platform_title_bar_height(window);
 
-        h_flex()
-            .h(Tab::container_height(cx))
-            .px_1()
-            .justify_between()
-            .border_b_1()
-            .border_color(cx.theme().colors().border)
+        v_flex()
             .child(
                 h_flex()
-                    .flex_1()
-                    .w_full()
-                    .gap_1p5()
+                    .h(header_height)
+                    .mt_px()
+                    .pb_px()
+                    .when(traffic_lights, |this| {
+                        this.pl(px(ui::utils::TRAFFIC_LIGHT_PADDING))
+                    })
+                    .pr_1p5()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border)
+                    .justify_between()
                     .child(
-                        IconButton::new("back", IconName::ArrowLeft)
-                            .icon_size(IconSize::Small)
-                            .tooltip(Tooltip::text("Back to Sidebar"))
-                            .on_click(cx.listener(|this, _, window, cx| {
-                                this.go_back(window, cx);
-                            })),
+                        h_flex()
+                            .gap_1p5()
+                            .child(
+                                IconButton::new("back", IconName::ArrowLeft)
+                                    .icon_size(IconSize::Small)
+                                    .tooltip(Tooltip::text("Back to Sidebar"))
+                                    .on_click(cx.listener(|this, _, window, cx| {
+                                        this.go_back(window, cx);
+                                    })),
+                            )
+                            .child(Label::new("Threads Archive").size(LabelSize::Small).mb_px()),
+                    )
+                    .child(self.render_agent_picker(cx)),
+            )
+            .child(
+                h_flex()
+                    .h(Tab::container_height(cx))
+                    .p_2()
+                    .pr_1p5()
+                    .gap_1p5()
+                    .border_b_1()
+                    .border_color(cx.theme().colors().border)
+                    .child(
+                        Icon::new(IconName::MagnifyingGlass)
+                            .size(IconSize::Small)
+                            .color(Color::Muted),
                     )
                     .child(self.filter_editor.clone())
                     .when(has_query, |this| {
-                        this.border_r_1().child(
-                            IconButton::new("clear_archive_filter", IconName::Close)
+                        this.child(
+                            IconButton::new("clear_filter", IconName::Close)
                                 .icon_size(IconSize::Small)
                                 .tooltip(Tooltip::text("Clear Search"))
                                 .on_click(cx.listener(|this, _, window, cx| {
@@ -686,13 +720,41 @@ impl ThreadsArchiveView {
                         )
                     }),
             )
-            .child(self.render_agent_picker(cx))
+    }
+}
+
+pub fn format_history_entry_timestamp(entry_time: DateTime<Utc>) -> String {
+    let now = Utc::now();
+    let duration = now.signed_duration_since(entry_time);
+
+    let minutes = duration.num_minutes();
+    let hours = duration.num_hours();
+    let days = duration.num_days();
+    let weeks = days / 7;
+    let months = days / 30;
+
+    if minutes < 60 {
+        format!("{}m", minutes.max(1))
+    } else if hours < 24 {
+        format!("{}h", hours.max(1))
+    } else if days < 7 {
+        format!("{}d", days.max(1))
+    } else if weeks < 4 {
+        format!("{}w", weeks.max(1))
+    } else {
+        format!("{}mo", months.max(1))
     }
 }
 
 impl Focusable for ThreadsArchiveView {
     fn focus_handle(&self, _cx: &App) -> FocusHandle {
         self.focus_handle.clone()
+    }
+}
+
+impl ThreadsArchiveView {
+    fn empty_state_message(&self, is_empty: bool, has_query: bool) -> Option<&'static str> {
+        archive_empty_state_message(self.history.is_some(), is_empty, has_query)
     }
 }
 
@@ -713,24 +775,13 @@ impl Render for ThreadsArchiveView {
                         .with_rotate_animation(2),
                 )
                 .into_any_element()
-        } else if is_empty && has_query {
+        } else if let Some(message) = self.empty_state_message(is_empty, has_query) {
             v_flex()
                 .flex_1()
                 .justify_center()
                 .items_center()
                 .child(
-                    Label::new("No threads match your search.")
-                        .size(LabelSize::Small)
-                        .color(Color::Muted),
-                )
-                .into_any_element()
-        } else if is_empty {
-            v_flex()
-                .flex_1()
-                .justify_center()
-                .items_center()
-                .child(
-                    Label::new("No archived threads yet.")
+                    Label::new(message)
                         .size(LabelSize::Small)
                         .color(Color::Muted),
                 )
@@ -763,8 +814,42 @@ impl Render for ThreadsArchiveView {
             .on_action(cx.listener(Self::confirm))
             .on_action(cx.listener(Self::remove_selected_thread))
             .size_full()
-            .bg(cx.theme().colors().surface_background)
-            .child(self.render_header(cx))
+            .child(self.render_header(window, cx))
             .child(content)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::archive_empty_state_message;
+
+    #[test]
+    fn empty_state_message_returns_none_when_archive_has_items() {
+        assert_eq!(archive_empty_state_message(false, false, false), None);
+        assert_eq!(archive_empty_state_message(true, false, true), None);
+    }
+
+    #[test]
+    fn empty_state_message_distinguishes_unsupported_history() {
+        assert_eq!(
+            archive_empty_state_message(false, true, false),
+            Some("This agent does not support viewing archived threads.")
+        );
+        assert_eq!(
+            archive_empty_state_message(false, true, true),
+            Some("This agent does not support viewing archived threads.")
+        );
+    }
+
+    #[test]
+    fn empty_state_message_distinguishes_empty_history_and_search_results() {
+        assert_eq!(
+            archive_empty_state_message(true, true, false),
+            Some("No archived threads yet.")
+        );
+        assert_eq!(
+            archive_empty_state_message(true, true, true),
+            Some("No threads match your search.")
+        );
     }
 }
