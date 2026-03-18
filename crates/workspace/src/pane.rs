@@ -13,7 +13,7 @@ use crate::{
     toolbar::Toolbar,
     workspace_settings::{AutosaveSetting, TabBarSettings, WorkspaceSettings},
 };
-use anyhow::Result;
+use anyhow::{Context as _, Result};
 use collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use futures::{StreamExt, stream::FuturesUnordered};
 use gpui::{
@@ -2370,19 +2370,92 @@ impl Pane {
             }
 
             if can_save {
-                pane.update_in(cx, |pane, window, cx| {
+                let save_result = pane.update_in(cx, |pane, window, cx| {
                     pane.unpreview_item_if_preview(item.item_id());
                     item.save(
                         SaveOptions {
                             format: should_format,
                             autosave: false,
                         },
-                        project,
+                        project.clone(),
                         window,
                         cx,
                     )
                 })?
-                .await?;
+                .await;
+
+                if let Err(save_error) = save_result {
+                    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+                    {
+                        let is_permission_denied = save_error.chain().any(|cause| {
+                            cause
+                                .downcast_ref::<std::io::Error>()
+                                .is_some_and(|io_err| {
+                                    io_err.kind() == std::io::ErrorKind::PermissionDenied
+                                })
+                        });
+
+                        if is_permission_denied {
+                            let answer = pane.update_in(cx, |pane, window, cx| {
+                                pane.activate_item(item_ix, true, true, window, cx);
+                                window.prompt(
+                                    PromptLevel::Warning,
+                                    "This file requires elevated permissions to save.",
+                                    Some(
+                                        "Would you like to retry with administrator privileges?",
+                                    ),
+                                    &["Save with Elevation", "Cancel"],
+                                    cx,
+                                )
+                            })?;
+
+                            if answer.await == Ok(0) {
+                                let (abs_path, content) =
+                                    cx.update(|_window, cx| -> Result<(PathBuf, Vec<u8>)> {
+                                        let project_path = item.project_path(cx).context(
+                                            "cannot resolve project path for elevated save",
+                                        )?;
+                                        let abs_path = project
+                                            .read(cx)
+                                            .absolute_path(&project_path, cx)
+                                            .context(
+                                                "cannot resolve absolute path for elevated save",
+                                            )?;
+                                        let buffer = project
+                                            .read(cx)
+                                            .get_open_buffer(&project_path, cx)
+                                            .context(
+                                                "cannot find open buffer for elevated save",
+                                            )?;
+                                        let buffer = buffer.read(cx);
+                                        let text = buffer.text();
+                                        let line_ending = buffer.line_ending();
+                                        let bytes =
+                                            if line_ending == language::LineEnding::Windows {
+                                                text.replace('\n', "\r\n").into_bytes()
+                                            } else {
+                                                text.into_bytes()
+                                            };
+                                        Ok((abs_path, bytes))
+                                    })??;
+
+                                fs::write_via_sudo(&abs_path, &content).await?;
+
+                                pane.update(cx, |_, cx| {
+                                    cx.emit(Event::UserSavedItem {
+                                        item: item.downgrade_item(),
+                                        save_intent,
+                                    });
+                                })?;
+                                return Ok(true);
+                            }
+                            return Ok(false);
+                        }
+                    }
+
+                    return Err(save_error);
+                }
+
             } else if can_save_as && is_singleton {
                 let suggested_name =
                     cx.update(|_window, cx| item.suggested_filename(cx).to_string())?;
