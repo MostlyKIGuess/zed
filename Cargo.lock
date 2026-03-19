@@ -4618,6 +4618,7 @@ dependencies = [
  "anyhow",
  "gpui",
  "indoc",
+ "inventory",
  "log",
  "paths",
  "release_channel",
@@ -4626,6 +4627,7 @@ dependencies = [
  "sqlez_macros",
  "tempfile",
  "util",
+ "uuid",
  "zed_env_vars",
 ]
 
@@ -6178,6 +6180,17 @@ name = "fancy-regex"
 version = "0.16.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "998b056554fbe42e03ae0e152895cd1a7e1002aec800fdc6635d20270260c46f"
+dependencies = [
+ "bit-set",
+ "regex-automata",
+ "regex-syntax",
+]
+
+[[package]]
+name = "fancy-regex"
+version = "0.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "72cf461f865c862bb7dc573f643dd6a2b6842f7c30b07882b56bd148cc2761b8"
 dependencies = [
  "bit-set",
  "regex-automata",
@@ -9154,7 +9167,7 @@ dependencies = [
  "bytecount",
  "data-encoding",
  "email_address",
- "fancy-regex",
+ "fancy-regex 0.16.2",
  "fraction",
  "getrandom 0.3.4",
  "idna",
@@ -10238,7 +10251,6 @@ dependencies = [
  "async-recursion",
  "collections",
  "editor",
- "fs",
  "gpui",
  "html5ever 0.27.0",
  "language",
@@ -13144,7 +13156,7 @@ dependencies = [
  "dap",
  "encoding_rs",
  "extension",
- "fancy-regex",
+ "fancy-regex 0.17.0",
  "fs",
  "futures 0.3.31",
  "fuzzy",
@@ -13237,6 +13249,7 @@ dependencies = [
  "criterion",
  "db",
  "editor",
+ "feature_flags",
  "file_icons",
  "git",
  "git_ui",
@@ -13248,6 +13261,7 @@ dependencies = [
  "pretty_assertions",
  "project",
  "rayon",
+ "remote_connection",
  "schemars",
  "search",
  "serde",
@@ -17608,7 +17622,7 @@ dependencies = [
  "anyhow",
  "base64 0.22.1",
  "bstr",
- "fancy-regex",
+ "fancy-regex 0.16.2",
  "lazy_static",
  "regex",
  "rustc-hash 1.1.0",
@@ -17764,6 +17778,7 @@ dependencies = [
  "recent_projects",
  "release_channel",
  "remote",
+ "remote_connection",
  "rpc",
  "schemars",
  "semver",

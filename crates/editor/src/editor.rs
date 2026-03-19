@@ -153,7 +153,7 @@ use multi_buffer::{
     ExcerptInfo, ExpandExcerptDirection, MultiBufferDiffHunk, MultiBufferPoint, MultiBufferRow,
 };
 use parking_lot::Mutex;
-use persistence::DB;
+use persistence::EditorDb;
 use project::{
     BreakpointWithPosition, CodeAction, Completion, CompletionDisplayOptions, CompletionIntent,
     CompletionResponse, CompletionSource, DisableAiSettings, DocumentHighlight, InlayHint, InlayId,
@@ -221,6 +221,7 @@ use workspace::{
     notifications::{DetachAndPromptErr, NotificationId, NotifyTaskExt},
     searchable::SearchEvent,
 };
+pub use zed_actions::editor::RevealInFileManager;
 use zed_actions::editor::{MoveDown, MoveUp};
 
 use crate::{
@@ -3757,6 +3758,7 @@ impl Editor {
                 let selections = selections.clone();
                 let background_executor = cx.background_executor().clone();
                 let editor_id = cx.entity().entity_id().as_u64() as ItemId;
+                let db = EditorDb::global(cx);
                 self.serialize_selections = cx.background_spawn(async move {
                     background_executor.timer(SERIALIZATION_THROTTLE_TIME).await;
                     let db_selections = selections
@@ -3769,7 +3771,7 @@ impl Editor {
                         })
                         .collect();
 
-                    DB.save_editor_selections(editor_id, workspace_id, db_selections)
+                    db.save_editor_selections(editor_id, workspace_id, db_selections)
                         .await
                         .with_context(|| {
                             format!(
@@ -3854,16 +3856,17 @@ impl Editor {
                 (start, end, start_fp, end_fp)
             })
             .collect::<Vec<_>>();
+        let db = EditorDb::global(cx);
         self.serialize_folds = cx.background_spawn(async move {
             background_executor.timer(SERIALIZATION_THROTTLE_TIME).await;
             if db_folds.is_empty() {
                 // No folds - delete any persisted folds for this file
-                DB.delete_file_folds(workspace_id, file_path)
+                db.delete_file_folds(workspace_id, file_path)
                     .await
                     .with_context(|| format!("deleting file folds for workspace {workspace_id:?}"))
                     .log_err();
             } else {
-                DB.save_file_folds(workspace_id, file_path, db_folds)
+                db.save_file_folds(workspace_id, file_path, db_folds)
                     .await
                     .with_context(|| {
                         format!("persisting file folds for workspace {workspace_id:?}")
@@ -14139,13 +14142,12 @@ impl Editor {
             return;
         };
 
-        let clipboard_text = match cx.read_from_clipboard() {
-            Some(item) => match item.entries().first() {
-                Some(ClipboardEntry::String(text)) => Some(text.text().to_string()),
+        let clipboard_text = cx.read_from_clipboard().and_then(|item| {
+            item.entries().iter().find_map(|entry| match entry {
+                ClipboardEntry::String(text) => Some(text.text().to_string()),
                 _ => None,
-            },
-            None => None,
-        };
+            })
+        });
 
         let Some(clipboard_text) = clipboard_text else {
             log::warn!("Clipboard doesn't contain text.");
@@ -14164,19 +14166,18 @@ impl Editor {
     pub fn paste(&mut self, _: &Paste, window: &mut Window, cx: &mut Context<Self>) {
         self.hide_mouse_cursor(HideMouseCursorOrigin::TypingAction, cx);
         if let Some(item) = cx.read_from_clipboard() {
-            let entries = item.entries();
-
-            match entries.first() {
-                // For now, we only support applying metadata if there's one string. In the future, we can incorporate all the selections
-                // of all the pasted entries.
-                Some(ClipboardEntry::String(clipboard_string)) if entries.len() == 1 => self
-                    .do_paste(
-                        clipboard_string.text(),
-                        clipboard_string.metadata_json::<Vec<ClipboardSelection>>(),
-                        true,
-                        window,
-                        cx,
-                    ),
+            let clipboard_string = item.entries().iter().find_map(|entry| match entry {
+                ClipboardEntry::String(s) => Some(s),
+                _ => None,
+            });
+            match clipboard_string {
+                Some(clipboard_string) => self.do_paste(
+                    clipboard_string.text(),
+                    clipboard_string.metadata_json::<Vec<ClipboardSelection>>(),
+                    true,
+                    window,
+                    cx,
+                ),
                 _ => self.do_paste(&item.text().unwrap_or_default(), None, true, window, cx),
             }
         }
@@ -25357,12 +25358,13 @@ impl Editor {
                 });
 
             // Try file_folds (path-based) first, fallback to editor_folds (migration)
+            let db = EditorDb::global(cx);
             let (folds, needs_migration) = if let Some(ref path) = file_path {
-                if let Some(folds) = DB.get_file_folds(workspace_id, path).log_err()
+                if let Some(folds) = db.get_file_folds(workspace_id, path).log_err()
                     && !folds.is_empty()
                 {
                     (Some(folds), false)
-                } else if let Some(folds) = DB.get_editor_folds(item_id, workspace_id).log_err()
+                } else if let Some(folds) = db.get_editor_folds(item_id, workspace_id).log_err()
                     && !folds.is_empty()
                 {
                     // Found old editor_folds data, will migrate to file_folds
@@ -25372,7 +25374,7 @@ impl Editor {
                 }
             } else {
                 // No file path, try editor_folds as fallback
-                let folds = DB.get_editor_folds(item_id, workspace_id).log_err();
+                let folds = db.get_editor_folds(item_id, workspace_id).log_err();
                 (folds.filter(|f| !f.is_empty()), false)
             };
 
@@ -25471,8 +25473,9 @@ impl Editor {
                     if needs_migration {
                         if let Some(ref path) = file_path {
                             let path = path.clone();
+                            let db = EditorDb::global(cx);
                             cx.spawn(async move |_, _| {
-                                DB.save_file_folds(workspace_id, path, db_folds_for_migration)
+                                db.save_file_folds(workspace_id, path, db_folds_for_migration)
                                     .await
                                     .log_err();
                             })
@@ -25482,7 +25485,7 @@ impl Editor {
                 }
             }
 
-            if let Some(selections) = DB.get_editor_selections(item_id, workspace_id).log_err()
+            if let Some(selections) = db.get_editor_selections(item_id, workspace_id).log_err()
                 && !selections.is_empty()
             {
                 let snapshot = buffer_snapshot.get_or_init(|| self.buffer.read(cx).snapshot(cx));
@@ -25517,7 +25520,10 @@ impl Editor {
             return;
         }
 
-        let Some(folds) = DB.get_file_folds(workspace_id, &file_path).log_err() else {
+        let Some(folds) = EditorDb::global(cx)
+            .get_file_folds(workspace_id, &file_path)
+            .log_err()
+        else {
             return;
         };
         if folds.is_empty() {
