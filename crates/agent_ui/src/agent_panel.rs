@@ -2511,6 +2511,10 @@ impl AgentPanel {
             .is_some_and(|thread| !thread.read(cx).entries().is_empty())
     }
 
+    pub fn active_thread_is_draft(&self, cx: &App) -> bool {
+        self.active_conversation().is_some() && !self.active_thread_has_messages(cx)
+    }
+
     fn handle_first_send_requested(
         &mut self,
         thread_view: Entity<ThreadView>,
@@ -3664,6 +3668,7 @@ impl AgentPanel {
 
     fn render_toolbar(&self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let agent_server_store = self.project.read(cx).agent_server_store().clone();
+        let has_visible_worktrees = self.project.read(cx).visible_worktrees(cx).next().is_some();
         let focus_handle = self.focus_handle(cx);
 
         let (selected_agent_custom_icon, selected_agent_label) =
@@ -4024,7 +4029,9 @@ impl AgentPanel {
                         .gap(DynamicSpacing::Base04.rems(cx))
                         .pl(DynamicSpacing::Base04.rems(cx))
                         .child(agent_selector_menu)
-                        .child(self.render_start_thread_in_selector(cx)),
+                        .when(has_visible_worktrees, |this| {
+                            this.child(self.render_start_thread_in_selector(cx))
+                        }),
                 )
                 .child(
                     h_flex()
