@@ -1276,8 +1276,8 @@ pub async fn run_cmd_elevated(program: &str, args: &[&str]) -> Result<()> {
         }
     }
 
-    // 3. Last resort: plain sudo (only works with NOPASSWD configured).
-    match run_elevated_via("sudo", &[], program, args).await {
+    // 3. Last resort: non-interactive sudo (only works with NOPASSWD configured).
+    match run_elevated_via("sudo", &["-n"], program, args).await {
         Ok(()) => return Ok(()),
         Err(err) => {
             log::info!("plain sudo failed: {err}");
@@ -1383,8 +1383,8 @@ async fn try_sudo_with_askpass(program: &str, args: &[&str]) -> Result<()> {
 #[cfg(any(target_os = "linux", target_os = "freebsd"))]
 async fn find_askpass_tool() -> Option<String> {
     let candidates = [
-        "zenity --password --title='Zed — Authentication Required'",
-        "kdialog --password 'Zed — Authentication Required'",
+        "zenity --password --title='Zed -- Authentication Required'",
+        "kdialog --password 'Zed -- Authentication Required'",
     ];
 
     let check_tools = ["zenity", "kdialog"];
@@ -1416,6 +1416,7 @@ async fn run_elevated_via(
 
     let output = smol::process::Command::new(elevator)
         .args(&command_args)
+        .env_remove("SHELL")
         .stdin(smol::process::Stdio::null())
         .stdout(smol::process::Stdio::null())
         .stderr(smol::process::Stdio::piped())
