@@ -2370,19 +2370,20 @@ impl Pane {
             }
 
             if can_save {
-                let save_result = pane.update_in(cx, |pane, window, cx| {
-                    pane.unpreview_item_if_preview(item.item_id());
-                    item.save(
-                        SaveOptions {
-                            format: should_format,
-                            autosave: false,
-                        },
-                        project.clone(),
-                        window,
-                        cx,
-                    )
-                })?
-                .await;
+                let save_result = pane
+                    .update_in(cx, |pane, window, cx| {
+                        pane.unpreview_item_if_preview(item.item_id());
+                        item.save(
+                            SaveOptions {
+                                format: should_format,
+                                autosave: false,
+                            },
+                            project.clone(),
+                            window,
+                            cx,
+                        )
+                    })?
+                    .await;
 
                 if let Err(save_error) = save_result {
                     #[cfg(any(target_os = "linux", target_os = "freebsd"))]
@@ -2401,9 +2402,7 @@ impl Pane {
                                 window.prompt(
                                     PromptLevel::Warning,
                                     "This file requires elevated permissions to save.",
-                                    Some(
-                                        "Would you like to retry with administrator privileges?",
-                                    ),
+                                    Some("Would you like to retry with administrator privileges?"),
                                     &["Save with Elevation", "Cancel"],
                                     cx,
                                 )
@@ -2424,24 +2423,38 @@ impl Pane {
                                         let buffer = project
                                             .read(cx)
                                             .get_open_buffer(&project_path, cx)
-                                            .context(
-                                                "cannot find open buffer for elevated save",
-                                            )?;
+                                            .context("cannot find open buffer for elevated save")?;
                                         let buffer = buffer.read(cx);
                                         let text = buffer.text();
                                         let line_ending = buffer.line_ending();
-                                        let bytes =
-                                            if line_ending == language::LineEnding::Windows {
-                                                text.replace('\n', "\r\n").into_bytes()
-                                            } else {
-                                                text.into_bytes()
-                                            };
+                                        let bytes = if line_ending == language::LineEnding::Windows
+                                        {
+                                            text.replace('\n', "\r\n").into_bytes()
+                                        } else {
+                                            text.into_bytes()
+                                        };
                                         Ok((abs_path, bytes))
                                     })??;
 
                                 fs::write_via_sudo(&abs_path, &content).await?;
 
                                 pane.update(cx, |_, cx| {
+                                    let project_path = item.project_path(cx);
+                                    if let Some(project_path) = project_path {
+                                        if let Some(buffer) =
+                                            project.read(cx).get_open_buffer(&project_path, cx)
+                                        {
+                                            let mtime = std::fs::metadata(&abs_path)
+                                                .ok()
+                                                .and_then(|m| m.modified().ok())
+                                                .map(|m| m.into());
+                                            buffer.update(cx, |buffer, cx| {
+                                                let version = buffer.version();
+                                                buffer.did_save(version, mtime, cx);
+                                            });
+                                        }
+                                    }
+
                                     cx.emit(Event::UserSavedItem {
                                         item: item.downgrade_item(),
                                         save_intent,
@@ -2455,7 +2468,6 @@ impl Pane {
 
                     return Err(save_error);
                 }
-
             } else if can_save_as && is_singleton {
                 let suggested_name =
                     cx.update(|_window, cx| item.suggested_filename(cx).to_string())?;

@@ -303,6 +303,12 @@ impl MTime {
     }
 }
 
+impl From<SystemTime> for MTime {
+    fn from(timestamp: SystemTime) -> Self {
+        MTime(timestamp)
+    }
+}
+
 impl From<proto::Timestamp> for MTime {
     fn from(timestamp: proto::Timestamp) -> Self {
         MTime(timestamp.into())
@@ -1430,7 +1436,6 @@ async fn run_elevated_via(
     }
     Ok(())
 }
-
 
 #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
 impl Watcher for RealWatcher {
