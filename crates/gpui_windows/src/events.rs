@@ -29,6 +29,10 @@ pub(crate) const WM_GPUI_KEYBOARD_LAYOUT_CHANGED: u32 = WM_USER + 6;
 pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_KEYDOWN: u32 = WM_USER + 8;
 
+/// DM_POINTERHITTEST message sent by the system when a pointer interacts
+/// with a Direct Manipulation viewport. Value from the Windows SDK.
+const DM_POINTERHITTEST: u32 = 0x0250;
+
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 
 impl WindowsWindowInner {
@@ -111,6 +115,7 @@ impl WindowsWindowInner {
             WM_GPUI_CURSOR_STYLE_CHANGED => self.handle_cursor_changed(lparam),
             WM_GPUI_FORCE_UPDATE_WINDOW => self.draw_window(handle, true),
             WM_GPUI_GPU_DEVICE_LOST => self.handle_device_lost(lparam),
+            DM_POINTERHITTEST => self.handle_dm_pointer_hit_test(wparam),
             _ => None,
         };
         if let Some(n) = handled {
@@ -500,24 +505,6 @@ impl WindowsWindowInner {
         };
         unsafe { ScreenToClient(handle, &mut cursor_point).ok().log_err() };
         let position = logical_point(cursor_point.x as f32, cursor_point.y as f32, scale_factor);
-
-        // Windows precision trackpads deliver pinch-to-zoom gestures as
-        // Ctrl+WM_MOUSEWHEEL. Intercept these and emit PinchEvent instead.
-        if modifiers.control {
-            let wheel_delta = wparam.signed_hiword() as f32 / WHEEL_DELTA as f32;
-            // Scale sensitivity: convert wheel ticks into a reasonable zoom delta.
-            // A full wheel tick (120 units = 1.0 here) maps to 0.1 zoom delta.
-            let zoom_delta = wheel_delta * 0.1;
-            let input = PlatformInput::Pinch(PinchEvent {
-                position,
-                delta: zoom_delta,
-                modifiers,
-                phase: TouchPhase::Moved,
-            });
-            let handled = !func(input).propagate;
-            self.state.callbacks.input.set(Some(func));
-            return if handled { Some(0) } else { Some(1) };
-        }
 
         let wheel_scroll_amount = match modifiers.shift {
             true => self
@@ -1160,9 +1147,30 @@ impl WindowsWindowInner {
         Some(0)
     }
 
+    fn handle_dm_pointer_hit_test(&self, wparam: WPARAM) -> Option<isize> {
+        if let Some(ref dm) = self.state.direct_manipulation {
+            dm.on_pointer_hit_test(wparam);
+        }
+        None
+    }
+
     #[inline]
     fn draw_window(&self, handle: HWND, force_render: bool) -> Option<isize> {
         let mut request_frame = self.state.callbacks.request_frame.take()?;
+
+        if let Some(ref dm) = self.state.direct_manipulation {
+            dm.update();
+
+            let events = dm.drain_events();
+            if !events.is_empty() {
+                if let Some(mut func) = self.state.callbacks.input.take() {
+                    for event in events {
+                        func(event);
+                    }
+                    self.state.callbacks.input.set(Some(func));
+                }
+            }
+        }
 
         // we are instructing gpui to force render a frame, this will
         // re-populate all the gpu textures for us so we can resume drawing in

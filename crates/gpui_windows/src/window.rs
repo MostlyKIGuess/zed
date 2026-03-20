@@ -26,6 +26,7 @@ use windows::{
     core::*,
 };
 
+use crate::direct_manipulation::DirectManipulationHandler;
 use crate::*;
 use gpui::*;
 
@@ -71,6 +72,7 @@ pub struct WindowsWindowState {
     fullscreen: Cell<Option<StyleAndBounds>>,
     initial_placement: Cell<Option<WindowOpenStatus>>,
     hwnd: HWND,
+    pub(crate) direct_manipulation: Option<DirectManipulationHandler>,
 }
 
 pub(crate) struct WindowsWindowInner {
@@ -131,6 +133,12 @@ impl WindowsWindowState {
         let fullscreen = None;
         let initial_placement = None;
 
+        // will fail on older Windows versions where API isn't available
+        let direct_manipulation = DirectManipulationHandler::new(hwnd, scale_factor);
+        if direct_manipulation.is_none() {
+            log::info!("Direct Manipulation API not available; trackpad pinch gestures disabled");
+        }
+
         Ok(Self {
             origin: Cell::new(origin),
             logical_size: Cell::new(logical_size),
@@ -157,6 +165,7 @@ impl WindowsWindowState {
             initial_placement: Cell::new(initial_placement),
             hwnd,
             invalidate_devices,
+            direct_manipulation,
         })
     }
 
