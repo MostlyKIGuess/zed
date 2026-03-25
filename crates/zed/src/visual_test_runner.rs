@@ -103,11 +103,11 @@ use {
     feature_flags::FeatureFlagAppExt as _,
     git_ui::project_diff::ProjectDiff,
     gpui::{
-        App, AppContext as _, Bounds, KeyBinding, Modifiers, VisualTestAppContext, WindowBounds,
-        WindowHandle, WindowOptions, point, px, size,
+        App, AppContext as _, Bounds, Entity, KeyBinding, Modifiers, VisualTestAppContext,
+        WindowBounds, WindowHandle, WindowOptions, point, px, size,
     },
     image::RgbaImage,
-    project::AgentId,
+    project::{AgentId, Project},
     project_panel::ProjectPanel,
     settings::{NotifyWhenAgentWaiting, Settings as _},
     settings_ui::SettingsWindow,
@@ -119,7 +119,7 @@ use {
         time::Duration,
     },
     util::ResultExt as _,
-    workspace::{AppState, MultiWorkspace, Panel as _, Workspace},
+    workspace::{AppState, MultiWorkspace, Workspace},
     zed_actions::OpenSettingsAt,
 };
 
@@ -1966,6 +1966,7 @@ impl AgentServer for StubAgentServer {
     fn connect(
         &self,
         _delegate: AgentServerDelegate,
+        _project: Entity<Project>,
         _cx: &mut App,
     ) -> gpui::Task<gpui::Result<Rc<dyn AgentConnection>>> {
         gpui::Task::ready(Ok(Rc::new(self.connection.clone())))
@@ -3544,7 +3545,6 @@ edition = "2021"
         new_workspace.update(cx, |workspace, cx| {
             if let Some(new_panel) = workspace.panel::<AgentPanel>(cx) {
                 new_panel.update(cx, |panel, cx| {
-                    panel.set_size(Some(px(480.0)), window, cx);
                     panel.open_external_thread_with_server(stub_agent.clone(), window, cx);
                 });
             }

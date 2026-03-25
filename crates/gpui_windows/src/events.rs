@@ -1169,10 +1169,11 @@ impl WindowsWindowInner {
             }
         }
 
-        // we are instructing gpui to force render a frame, this will
-        // re-populate all the gpu textures for us so we can resume drawing in
-        // case we disabled drawing earlier due to a device loss
-        self.state.renderer.borrow_mut().mark_drawable();
+        if force_render {
+            // Re-enable drawing after a device loss recovery. The forced render
+            // will rebuild the scene with fresh atlas textures.
+            self.state.renderer.borrow_mut().mark_drawable();
+        }
         request_frame(RequestFrameOptions {
             require_presentation: false,
             force_render,
