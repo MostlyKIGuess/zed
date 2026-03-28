@@ -356,9 +356,6 @@ impl Interactivity {
 
     /// Bind the given callback to pinch gesture events during the bubble phase.
     ///
-    /// Pinch events are supported on macOS, Wayland, X11 (XInput 2.4+), and Windows.
-    /// On Windows, trackpad pinch gestures are delivered as synthetic pinch events.
-    ///
     /// See [`Context::listener`](crate::Context::listener) to get access to a view's state from this callback.
     pub fn on_pinch(&mut self, listener: impl Fn(&PinchEvent, &mut Window, &mut App) + 'static) {
         self.pinch_listeners
@@ -370,9 +367,6 @@ impl Interactivity {
     }
 
     /// Bind the given callback to pinch gesture events during the capture phase.
-    ///
-    /// Pinch events are supported on macOS, Wayland, X11 (XInput 2.4+), and Windows.
-    /// On Windows, trackpad pinch gestures are delivered as synthetic pinch events.
     ///
     /// See [`Context::listener`](crate::Context::listener) to get access to a view's state from this callback.
     pub fn capture_pinch(
@@ -948,9 +942,6 @@ pub trait InteractiveElement: Sized {
     /// Bind the given callback to pinch gesture events during the bubble phase.
     /// The fluent API equivalent to [`Interactivity::on_pinch`].
     ///
-    /// Pinch events are supported on macOS, Wayland, X11 (XInput 2.4+), and Windows.
-    /// On Windows, trackpad pinch gestures are delivered as synthetic pinch events.
-    ///
     /// See [`Context::listener`](crate::Context::listener) to get access to a view's state from this callback.
     fn on_pinch(mut self, listener: impl Fn(&PinchEvent, &mut Window, &mut App) + 'static) -> Self {
         self.interactivity().on_pinch(listener);
@@ -959,9 +950,6 @@ pub trait InteractiveElement: Sized {
 
     /// Bind the given callback to pinch gesture events during the capture phase.
     /// The fluent API equivalent to [`Interactivity::capture_pinch`].
-    ///
-    /// Pinch events are supported on macOS, Wayland, X11 (XInput 2.4+), and Windows.
-    /// On Windows, trackpad pinch gestures are delivered as synthetic pinch events.
     ///
     /// See [`Context::listener`](crate::Context::listener) to get access to a view's state from this callback.
     fn capture_pinch(
@@ -1713,7 +1701,6 @@ pub struct Interactivity {
     pub(crate) mouse_pressure_listeners: Vec<MousePressureListener>,
     pub(crate) mouse_move_listeners: Vec<MouseMoveListener>,
     pub(crate) scroll_wheel_listeners: Vec<ScrollWheelListener>,
-
     pub(crate) pinch_listeners: Vec<PinchListener>,
     pub(crate) key_down_listeners: Vec<KeyDownListener>,
     pub(crate) key_up_listeners: Vec<KeyUpListener>,

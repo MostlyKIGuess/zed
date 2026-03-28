@@ -29,10 +29,6 @@ pub(crate) const WM_GPUI_KEYBOARD_LAYOUT_CHANGED: u32 = WM_USER + 6;
 pub(crate) const WM_GPUI_GPU_DEVICE_LOST: u32 = WM_USER + 7;
 pub(crate) const WM_GPUI_KEYDOWN: u32 = WM_USER + 8;
 
-/// DM_POINTERHITTEST message sent by the system when a pointer interacts
-/// with a Direct Manipulation viewport. Value from the Windows SDK.
-const DM_POINTERHITTEST: u32 = 0x0250;
-
 const SIZE_MOVE_LOOP_TIMER_ID: usize = 1;
 
 impl WindowsWindowInner {
@@ -763,6 +759,10 @@ impl WindowsWindowInner {
         self.state.scale_factor.set(new_scale_factor);
         self.state.border_offset.update(handle).log_err();
 
+        self.state
+            .direct_manipulation
+            .set_scale_factor(new_scale_factor);
+
         if is_maximized {
             // Get the monitor and its work area at the new DPI
             let monitor = unsafe { MonitorFromWindow(handle, MONITOR_DEFAULTTONEAREST) };
@@ -1145,9 +1145,7 @@ impl WindowsWindowInner {
     }
 
     fn handle_dm_pointer_hit_test(&self, wparam: WPARAM) -> Option<isize> {
-        if let Some(ref dm) = self.state.direct_manipulation {
-            dm.on_pointer_hit_test(wparam);
-        }
+        self.state.direct_manipulation.on_pointer_hit_test(wparam);
         None
     }
 
@@ -1155,17 +1153,15 @@ impl WindowsWindowInner {
     fn draw_window(&self, handle: HWND, force_render: bool) -> Option<isize> {
         let mut request_frame = self.state.callbacks.request_frame.take()?;
 
-        if let Some(ref dm) = self.state.direct_manipulation {
-            dm.update();
+        self.state.direct_manipulation.update();
 
-            let events = dm.drain_events();
-            if !events.is_empty() {
-                if let Some(mut func) = self.state.callbacks.input.take() {
-                    for event in events {
-                        func(event);
-                    }
-                    self.state.callbacks.input.set(Some(func));
+        let events = self.state.direct_manipulation.drain_events();
+        if !events.is_empty() {
+            if let Some(mut func) = self.state.callbacks.input.take() {
+                for event in events {
+                    func(event);
                 }
+                self.state.callbacks.input.set(Some(func));
             }
         }
 

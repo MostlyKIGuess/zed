@@ -58,6 +58,7 @@ pub struct WindowsWindowState {
     pub last_reported_modifiers: Cell<Option<Modifiers>>,
     pub last_reported_capslock: Cell<Option<Capslock>>,
     pub hovered: Cell<bool>,
+    pub direct_manipulation: DirectManipulationHandler,
 
     pub renderer: RefCell<DirectXRenderer>,
 
@@ -72,7 +73,6 @@ pub struct WindowsWindowState {
     fullscreen: Cell<Option<StyleAndBounds>>,
     initial_placement: Cell<Option<WindowOpenStatus>>,
     hwnd: HWND,
-    pub(crate) direct_manipulation: Option<DirectManipulationHandler>,
 }
 
 pub(crate) struct WindowsWindowInner {
@@ -133,11 +133,8 @@ impl WindowsWindowState {
         let fullscreen = None;
         let initial_placement = None;
 
-        // will fail on older Windows versions where API isn't available
-        let direct_manipulation = DirectManipulationHandler::new(hwnd, scale_factor);
-        if direct_manipulation.is_none() {
-            log::info!("Direct Manipulation API not available; trackpad pinch gestures disabled");
-        }
+        let direct_manipulation = DirectManipulationHandler::new(hwnd, scale_factor)
+            .context("initializing Direct Manipulation")?;
 
         Ok(Self {
             origin: Cell::new(origin),

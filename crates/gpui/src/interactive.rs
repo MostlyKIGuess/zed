@@ -473,9 +473,6 @@ impl Default for ScrollDelta {
 /// A pinch gesture event from the platform, generated when the user performs
 /// a pinch-to-zoom gesture (typically on a trackpad).
 ///
-/// Supported on macOS, Wayland (Linux), X11 (requires XInput 2.4+), and Windows.
-/// On Windows, pinch gestures from precision trackpads are delivered as
-/// synthetic pinch events (converted from Ctrl+ScrollWheel).
 #[derive(Clone, Debug, Default)]
 pub struct PinchEvent {
     /// The position of the pinch center on the window.
