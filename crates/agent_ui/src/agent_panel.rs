@@ -76,7 +76,7 @@ use prompt_store::{PromptBuilder, PromptStore, UserPromptId};
 use rules_library::{RulesLibrary, open_rules_library};
 use search::{BufferSearchBar, buffer_search};
 use settings::{Settings, update_settings_file};
-use theme::ThemeSettings;
+use theme_settings::ThemeSettings;
 use ui::{
     Button, Callout, CommonAnimationExt, ContextMenu, ContextMenuEntry, DocumentationSide,
     KeyBinding, PopoverMenu, PopoverMenuHandle, Tab, Tooltip, prelude::*, utils::WithRemSize,
@@ -1179,7 +1179,8 @@ impl AgentPanel {
     }
 
     pub fn new_thread(&mut self, _action: &NewThread, window: &mut Window, cx: &mut Context<Self>) {
-        self.new_agent_thread(AgentType::NativeAgent, window, cx);
+        self.reset_start_thread_in_to_default(cx);
+        self.external_thread(None, None, None, None, None, true, window, cx);
     }
 
     fn new_native_agent_thread_from_summary(
@@ -1623,17 +1624,17 @@ impl AgentPanel {
                         let agent_buffer_font_size =
                             ThemeSettings::get_global(cx).agent_buffer_font_size(cx) + delta;
 
-                        let _ = settings
-                            .theme
-                            .agent_ui_font_size
-                            .insert(f32::from(theme::clamp_font_size(agent_ui_font_size)).into());
+                        let _ = settings.theme.agent_ui_font_size.insert(
+                            f32::from(theme_settings::clamp_font_size(agent_ui_font_size)).into(),
+                        );
                         let _ = settings.theme.agent_buffer_font_size.insert(
-                            f32::from(theme::clamp_font_size(agent_buffer_font_size)).into(),
+                            f32::from(theme_settings::clamp_font_size(agent_buffer_font_size))
+                                .into(),
                         );
                     });
                 } else {
-                    theme::adjust_agent_ui_font_size(cx, |size| size + delta);
-                    theme::adjust_agent_buffer_font_size(cx, |size| size + delta);
+                    theme_settings::adjust_agent_ui_font_size(cx, |size| size + delta);
+                    theme_settings::adjust_agent_buffer_font_size(cx, |size| size + delta);
                 }
             }
             WhichFontSize::BufferFont => {
@@ -1657,14 +1658,14 @@ impl AgentPanel {
                 settings.theme.agent_buffer_font_size = None;
             });
         } else {
-            theme::reset_agent_ui_font_size(cx);
-            theme::reset_agent_buffer_font_size(cx);
+            theme_settings::reset_agent_ui_font_size(cx);
+            theme_settings::reset_agent_buffer_font_size(cx);
         }
     }
 
     pub fn reset_agent_zoom(&mut self, _window: &mut Window, cx: &mut Context<Self>) {
-        theme::reset_agent_ui_font_size(cx);
-        theme::reset_agent_buffer_font_size(cx);
+        theme_settings::reset_agent_ui_font_size(cx);
+        theme_settings::reset_agent_buffer_font_size(cx);
     }
 
     pub fn toggle_zoom(&mut self, _: &ToggleZoom, window: &mut Window, cx: &mut Context<Self>) {
@@ -1688,6 +1689,7 @@ impl AgentPanel {
             AgentConfiguration::new(
                 fs,
                 agent_server_store,
+                self.connection_store.clone(),
                 context_server_store,
                 self.context_server_registry.clone(),
                 self.language_registry.clone(),
@@ -2231,6 +2233,10 @@ impl AgentPanel {
                 |this, view, event: &AcpThreadViewEvent, window, cx| match event {
                     AcpThreadViewEvent::FirstSendRequested { content } => {
                         this.handle_first_send_requested(view.clone(), content.clone(), window, cx);
+                    }
+                    AcpThreadViewEvent::MessageSentOrQueued => {
+                        let session_id = view.read(cx).thread.read(cx).session_id().clone();
+                        cx.emit(AgentPanelEvent::MessageSentOrQueued { session_id });
                     }
                 },
             )
@@ -3111,6 +3117,7 @@ pub enum AgentPanelEvent {
     ActiveViewChanged,
     ThreadFocused,
     BackgroundThreadChanged,
+    MessageSentOrQueued { session_id: acp::SessionId },
 }
 
 impl EventEmitter<PanelEvent> for AgentPanel {}
@@ -3184,11 +3191,15 @@ impl Panel for AgentPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        8
+        0
     }
 
     fn enabled(&self, cx: &App) -> bool {
         AgentSettings::get_global(cx).enabled(cx)
+    }
+
+    fn is_agent_panel(&self) -> bool {
+        true
     }
 
     fn is_zoomed(&self, _window: &Window, _cx: &App) -> bool {
@@ -3821,8 +3832,6 @@ impl AgentPanel {
                                     }
                                 }),
                         )
-                        .separator()
-                        .header("External Agents")
                         .map(|mut menu| {
                             let agent_server_store = agent_server_store.read(cx);
                             let registry_store = project::AgentRegistryStore::try_global(cx);
@@ -3853,6 +3862,9 @@ impl AgentPanel {
                                 .sorted_unstable_by_key(|e| e.display_name.to_lowercase())
                                 .collect::<Vec<_>>();
 
+                            if !agent_items.is_empty() {
+                                menu = menu.separator().header("External Agents");
+                            }
                             for item in &agent_items {
                                 let mut entry = ContextMenuEntry::new(item.display_name.clone());
 

@@ -58,7 +58,7 @@ use std::{
     sync::Arc,
     time::Duration,
 };
-use theme::ThemeSettings;
+use theme_settings::ThemeSettings;
 use ui::{
     Color, ContextMenu, ContextMenuEntry, DecoratedIcon, Divider, Icon, IconDecoration,
     IconDecorationKind, IndentGuideColors, IndentGuideLayout, Indicator, KeyBinding, Label,
@@ -7239,7 +7239,7 @@ impl Panel for ProjectPanel {
     }
 
     fn activation_priority(&self) -> u32 {
-        0
+        1
     }
 }
 

@@ -24,6 +24,7 @@ use gpui::{
     actions, anchored, deferred, div,
 };
 use language::{Language, LanguageConfig, ToOffset as _};
+
 use notifications::status_toast::{StatusToast, ToastIcon};
 use project::{CompletionDisplayOptions, Project};
 use settings::{
@@ -2405,9 +2406,10 @@ impl RenderOnce for SyntaxHighlightedText {
             }
 
             let mut run_style = text_style.clone();
-            if let Some(highlight_style) = highlight_id.style(syntax_theme) {
+            if let Some(highlight_style) = syntax_theme.get(highlight_id).cloned() {
                 run_style = run_style.highlight(highlight_style);
             }
+
             // add the highlighted range
             runs.push(run_style.to_run(highlight_range.len()));
             offset = highlight_range.end;
@@ -3429,7 +3431,7 @@ impl ActionArgumentsEditor {
 
 impl Render for ActionArgumentsEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let settings = theme::ThemeSettings::get_global(cx);
+        let settings = theme_settings::ThemeSettings::get_global(cx);
         let colors = cx.theme().colors();
 
         let border_color = if self.is_loading {

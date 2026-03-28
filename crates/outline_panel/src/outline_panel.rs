@@ -25,6 +25,7 @@ use gpui::{
 use itertools::Itertools;
 use language::language_settings::LanguageSettings;
 use language::{Anchor, BufferId, BufferSnapshot, OffsetRangeExt, OutlineItem};
+
 use menu::{Cancel, SelectFirst, SelectLast, SelectNext, SelectPrevious};
 use std::{
     cmp,
@@ -46,7 +47,8 @@ use search::{BufferSearchBar, ProjectSearchView};
 use serde::{Deserialize, Serialize};
 use settings::{Settings, SettingsStore};
 use smol::channel;
-use theme::{SyntaxTheme, ThemeSettings};
+use theme::SyntaxTheme;
+use theme_settings::ThemeSettings;
 use ui::{
     ContextMenu, FluentBuilder, HighlightedLabel, IconButton, IconButtonShape, IndentGuideColors,
     IndentGuideLayout, ListItem, ScrollAxes, Scrollbars, Tab, Tooltip, WithScrollbar, prelude::*,
@@ -236,7 +238,8 @@ impl SearchState {
                         }
                         let style = chunk
                             .syntax_highlight_id
-                            .and_then(|highlight| highlight.style(&theme));
+                            .and_then(|highlight| theme.get(highlight).cloned());
+
                         if let Some(style) = style {
                             let start = context_text.len();
                             let end = start + chunk.text.len();
@@ -6897,7 +6900,7 @@ outline: struct OutlineEntryExcerpt
             let settings = SettingsStore::test(cx);
             cx.set_global(settings);
 
-            theme::init(theme::LoadThemes::JustBase, cx);
+            theme_settings::init(theme::LoadThemes::JustBase, cx);
 
             editor::init(cx);
             project_search::init(cx);
