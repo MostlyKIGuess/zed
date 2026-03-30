@@ -10,8 +10,8 @@ use feature_flags::{FeatureFlagAppExt as _, NotebookFeatureFlag};
 use futures::FutureExt;
 use futures::future::Shared;
 use gpui::{
-    AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, ListScrollEvent, ListState,
-    Point, Task, actions, list, prelude::*,
+    AnyElement, App, Entity, EventEmitter, FocusHandle, Focusable, KeyContext, ListScrollEvent,
+    ListState, Point, Task, actions, list, prelude::*,
 };
 use jupyter_protocol::JupyterKernelspec;
 use language::{Language, LanguageRegistry};
@@ -668,7 +668,7 @@ impl NotebookEditor {
                 if let Some(cell) = self.cell_map.get(cell_id) {
                     match cell {
                         Cell::Code(code_cell) => {
-                            let editor = code_cell.read(cx).editor().clone();
+                            let editor = code_cell.read(cx).editor();
                             window.focus(&editor.focus_handle(cx), cx);
                         }
                         Cell::Markdown(markdown_cell) => {
@@ -1252,14 +1252,19 @@ impl NotebookEditor {
 
 impl Render for NotebookEditor {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        let mode_context = match self.notebook_mode {
-            NotebookMode::Command => "NotebookEditor notebook_mode=command",
-            NotebookMode::Edit => "NotebookEditor notebook_mode=edit",
-        };
+        let mut key_context = KeyContext::new_with_defaults();
+        key_context.add("NotebookEditor");
+        key_context.set(
+            "notebook_mode",
+            match self.notebook_mode {
+                NotebookMode::Command => "command",
+                NotebookMode::Edit => "edit",
+            },
+        );
 
         v_flex()
             .size_full()
-            .key_context(mode_context)
+            .key_context(key_context)
             .track_focus(&self.focus_handle)
             .on_action(cx.listener(|this, _: &OpenNotebook, window, cx| {
                 this.open_notebook(&OpenNotebook, window, cx)
