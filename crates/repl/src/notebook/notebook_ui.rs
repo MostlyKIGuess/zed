@@ -598,6 +598,7 @@ impl NotebookEditor {
         let is_last_cell = self.selected_cell_index == self.cell_count().saturating_sub(1);
         if is_last_cell {
             self.add_code_block(window, cx);
+            self.enter_command_mode(window, cx);
         } else {
             self.advance_in_command_mode(window, cx);
         }
