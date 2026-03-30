@@ -8840,6 +8840,36 @@ async fn test_paste_multiline(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+async fn test_paste_undo_does_not_include_preceding_edits(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+
+    let mut cx = EditorTestContext::new(cx).await;
+
+    cx.update_editor(|e, _, cx| {
+        e.buffer().update(cx, |buffer, cx| {
+            buffer.set_group_interval(Duration::from_secs(10), cx)
+        })
+    });
+    // Type some text
+    cx.set_state("ˇ");
+    cx.update_editor(|e, window, cx| e.insert("hello", window, cx));
+    // cx.assert_editor_state("helloˇ");
+
+    // Paste some text immediately after typing
+    cx.write_to_clipboard(ClipboardItem::new_string(" world".into()));
+    cx.update_editor(|e, window, cx| e.paste(&Paste, window, cx));
+    cx.assert_editor_state("hello worldˇ");
+
+    // Undo should only undo the paste, not the preceding typing
+    cx.update_editor(|e, window, cx| e.undo(&Undo, window, cx));
+    cx.assert_editor_state("helloˇ");
+
+    // Undo again should undo the typing
+    cx.update_editor(|e, window, cx| e.undo(&Undo, window, cx));
+    cx.assert_editor_state("ˇ");
+}
+
+#[gpui::test]
 async fn test_paste_content_from_other_app(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
 
@@ -25371,6 +25401,55 @@ async fn test_goto_definition_far_ranges_open_multibuffer(cx: &mut TestAppContex
             "Multibuffer should contain the second definition"
         );
     });
+}
+
+#[gpui::test]
+async fn test_goto_definition_contained_ranges(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorLspTestContext::new_rust(
+        lsp::ServerCapabilities {
+            definition_provider: Some(lsp::OneOf::Left(true)),
+            ..lsp::ServerCapabilities::default()
+        },
+        cx,
+    )
+    .await;
+
+    // The LSP returns two single-line definitions on the same row where one
+    // range contains the other. Both are on the same line so the
+    // `fits_in_one_excerpt` check won't underflow, and the code reaches
+    // `change_selections`.
+    cx.set_state(
+        &r#"fn caller() {
+            let _ = ˇtarget();
+        }
+        fn target_outer() { fn target_inner() {} }
+        "#
+        .unindent(),
+    );
+
+    // Return two definitions on the same line: an outer range covering the
+    // whole line and an inner range for just the inner function name.
+    cx.set_request_handler::<lsp::request::GotoDefinition, _, _>(move |url, _, _| async move {
+        Ok(Some(lsp::GotoDefinitionResponse::Array(vec![
+            // Inner range: just "target_inner" (cols 23..35)
+            lsp::Location {
+                uri: url.clone(),
+                range: lsp::Range::new(lsp::Position::new(3, 23), lsp::Position::new(3, 35)),
+            },
+            // Outer range: the whole line (cols 0..48)
+            lsp::Location {
+                uri: url,
+                range: lsp::Range::new(lsp::Position::new(3, 0), lsp::Position::new(3, 48)),
+            },
+        ])))
+    });
+
+    let navigated = cx
+        .update_editor(|editor, window, cx| editor.go_to_definition(&GoToDefinition, window, cx))
+        .await
+        .expect("Failed to navigate to definitions");
+    assert_eq!(navigated, Navigated::Yes);
 }
 
 #[gpui::test]
