@@ -38,6 +38,7 @@ screen-capture = [
     "scap",
 ]
 windows-manifest = ["dep:embed-resource"]
+webview = ["wry", "gtk"]
 
 [lib]
 path = "src/gpui.rs"
@@ -103,6 +104,7 @@ pollster.workspace = true
 url.workspace = true
 uuid.workspace = true
 web-time.workspace = true
+wry = { workspace = true, optional = true }
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 getrandom = { version = "0.3.4", features = ["wasm_js"] }
@@ -133,6 +135,9 @@ metal.workspace = true
 [target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "macos"))'.dependencies]
 pathfinder_geometry = "0.5"
 
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies]
+gtk = { version = "0.18.2", optional = true }
+
 [target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))'.dependencies]
 scap = { workspace = true, optional = true }
 
@@ -146,7 +151,7 @@ windows = { version = "0.61", features = ["Win32_Foundation"] }
 backtrace.workspace = true
 collections = { workspace = true, features = ["test-support"] }
 env_logger.workspace = true
-gpui_platform = { workspace = true, features = ["font-kit"] }
+gpui_platform = { workspace = true, features = ["font-kit", "wayland"] }
 gpui_util = { workspace = true }
 lyon = { version = "1.0", features = ["extra"] }
 proptest = { workspace = true }
@@ -228,6 +233,11 @@ path = "examples/tree.rs"
 [[example]]
 name = "uniform_list"
 path = "examples/uniform_list.rs"
+
+[[example]]
+name = "webview"
+path = "examples/webview.rs"
+required-features = ["webview"]
 
 [[example]]
 name = "window_shadow"

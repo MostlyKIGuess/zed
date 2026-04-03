@@ -11,6 +11,11 @@ mod svg;
 mod text;
 mod uniform_list;
 
+#[cfg(feature = "webview")]
+mod webview;
+#[cfg(feature = "webview")]
+pub use webview::*;
+
 pub use anchored::*;
 pub use animation::*;
 pub use canvas::*;

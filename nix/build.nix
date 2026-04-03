@@ -21,10 +21,12 @@
   makeWrapper,
 
   alsa-lib,
+  cairo,
   cmake,
   curl,
   fontconfig,
   freetype,
+  gdk-pixbuf,
   git,
   glib,
   libdrm,
@@ -42,12 +44,15 @@
   libxcb,
   nodejs_22,
   openssl,
+  pango,
   perl,
   pkg-config,
   protobuf,
   sqlite,
   vulkan-loader,
   wayland,
+  webkitgtk_4_1,
+  gtk3,
   xorg,
   zlib,
   zstd,
@@ -193,6 +198,12 @@ let
         libxext
         libxfixes
         libxrandr
+        # WebView dependencies (for wry crate)
+        cairo
+        gdk-pixbuf
+        webkitgtk_4_1
+        gtk3
+        pango
       ]
       ++ lib.optionals stdenv'.hostPlatform.isDarwin [
         apple-sdk_15
@@ -242,6 +253,11 @@ let
             gpu-lib
             wayland
             libva
+            webkitgtk_4_1
+            gtk3
+            pango
+            cairo
+            gdk-pixbuf
           ]
         }";
 
