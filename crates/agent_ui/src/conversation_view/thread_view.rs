@@ -552,17 +552,10 @@ impl ThreadView {
                     let scroll_top = list_state.logical_scroll_top();
                     let _ = thread_view.update(cx, |this, cx| {
                         if !is_following_tail {
-                            let is_at_bottom = {
-                                let current_offset =
-                                    list_state.scroll_px_offset_for_scrollbar().y.abs();
-                                let max_offset = list_state.max_offset_for_scrollbar().y;
-                                current_offset >= max_offset - px(1.0)
-                            };
-
                             let is_generating =
                                 matches!(this.thread.read(cx).status(), ThreadStatus::Generating);
 
-                            if is_at_bottom && is_generating {
+                            if list_state.is_at_bottom() && is_generating {
                                 list_state.set_follow_tail(true);
                             }
                         }
@@ -4952,7 +4945,7 @@ impl ThreadView {
     }
 
     pub fn scroll_to_end(&mut self, cx: &mut Context<Self>) {
-        self.list_state.scroll_to_end();
+        self.list_state.set_follow_tail(true);
         cx.notify();
     }
 
@@ -4974,8 +4967,120 @@ impl ThreadView {
     }
 
     pub(crate) fn scroll_to_top(&mut self, cx: &mut Context<Self>) {
+        self.list_state.set_follow_tail(false);
         self.list_state.scroll_to(ListOffset::default());
         cx.notify();
+    }
+
+    fn scroll_output_page_up(
+        &mut self,
+        _: &ScrollOutputPageUp,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let page_height = self.list_state.viewport_bounds().size.height;
+        self.list_state.set_follow_tail(false);
+        self.list_state.scroll_by(-page_height * 0.9);
+        cx.notify();
+    }
+
+    fn scroll_output_page_down(
+        &mut self,
+        _: &ScrollOutputPageDown,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let page_height = self.list_state.viewport_bounds().size.height;
+        self.list_state.set_follow_tail(false);
+        self.list_state.scroll_by(page_height * 0.9);
+        if self.list_state.is_at_bottom() {
+            self.list_state.set_follow_tail(true);
+        }
+        cx.notify();
+    }
+
+    fn scroll_output_line_up(
+        &mut self,
+        _: &ScrollOutputLineUp,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.list_state.set_follow_tail(false);
+        self.list_state.scroll_by(-window.line_height() * 3.);
+        cx.notify();
+    }
+
+    fn scroll_output_line_down(
+        &mut self,
+        _: &ScrollOutputLineDown,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.list_state.set_follow_tail(false);
+        self.list_state.scroll_by(window.line_height() * 3.);
+        if self.list_state.is_at_bottom() {
+            self.list_state.set_follow_tail(true);
+        }
+        cx.notify();
+    }
+
+    fn scroll_output_to_top(
+        &mut self,
+        _: &ScrollOutputToTop,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.scroll_to_top(cx);
+    }
+
+    fn scroll_output_to_bottom(
+        &mut self,
+        _: &ScrollOutputToBottom,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        self.scroll_to_end(cx);
+    }
+
+    fn scroll_output_to_previous_message(
+        &mut self,
+        _: &ScrollOutputToPreviousMessage,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entries = self.thread.read(cx).entries();
+        let current_ix = self.list_state.logical_scroll_top().item_ix;
+        if let Some(target_ix) = (0..current_ix)
+            .rev()
+            .find(|&i| matches!(entries.get(i), Some(AgentThreadEntry::UserMessage(_))))
+        {
+            self.list_state.set_follow_tail(false);
+            self.list_state.scroll_to(ListOffset {
+                item_ix: target_ix,
+                offset_in_item: px(0.),
+            });
+            cx.notify();
+        }
+    }
+
+    fn scroll_output_to_next_message(
+        &mut self,
+        _: &ScrollOutputToNextMessage,
+        _window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let entries = self.thread.read(cx).entries();
+        let current_ix = self.list_state.logical_scroll_top().item_ix;
+        if let Some(target_ix) = (current_ix + 1..entries.len())
+            .find(|&i| matches!(entries.get(i), Some(AgentThreadEntry::UserMessage(_))))
+        {
+            self.list_state.set_follow_tail(false);
+            self.list_state.scroll_to(ListOffset {
+                item_ix: target_ix,
+                offset_in_item: px(0.),
+            });
+            cx.notify();
+        }
     }
 
     pub fn open_thread_as_markdown(
@@ -5152,9 +5257,12 @@ impl ThreadView {
     }
 
     pub(crate) fn auto_expand_streaming_thought(&mut self, cx: &mut Context<Self>) {
-        // Only auto-expand thinking blocks in Automatic mode.
-        // AlwaysExpanded shows them open by default; AlwaysCollapsed keeps them closed.
-        if AgentSettings::get_global(cx).thinking_display != ThinkingBlockDisplay::Automatic {
+        let thinking_display = AgentSettings::get_global(cx).thinking_display;
+
+        if !matches!(
+            thinking_display,
+            ThinkingBlockDisplay::Auto | ThinkingBlockDisplay::Preview
+        ) {
             return;
         }
 
@@ -5183,6 +5291,13 @@ impl ThreadView {
                 cx.notify();
             }
         } else if self.auto_expanded_thinking_block.is_some() {
+            if thinking_display == ThinkingBlockDisplay::Auto {
+                if let Some(key) = self.auto_expanded_thinking_block {
+                    if !self.user_toggled_thinking_blocks.contains(&key) {
+                        self.expanded_thinking_blocks.remove(&key);
+                    }
+                }
+            }
             self.auto_expanded_thinking_block = None;
             cx.notify();
         }
@@ -5196,7 +5311,19 @@ impl ThreadView {
         let thinking_display = AgentSettings::get_global(cx).thinking_display;
 
         match thinking_display {
-            ThinkingBlockDisplay::Automatic => {
+            ThinkingBlockDisplay::Auto => {
+                let is_open = self.expanded_thinking_blocks.contains(&key)
+                    || self.user_toggled_thinking_blocks.contains(&key);
+
+                if is_open {
+                    self.expanded_thinking_blocks.remove(&key);
+                    self.user_toggled_thinking_blocks.remove(&key);
+                } else {
+                    self.expanded_thinking_blocks.insert(key);
+                    self.user_toggled_thinking_blocks.insert(key);
+                }
+            }
+            ThinkingBlockDisplay::Preview => {
                 let is_user_expanded = self.user_toggled_thinking_blocks.contains(&key);
                 let is_in_expanded_set = self.expanded_thinking_blocks.contains(&key);
 
@@ -5249,7 +5376,11 @@ impl ThreadView {
         let is_in_expanded_set = self.expanded_thinking_blocks.contains(&key);
 
         let (is_open, is_constrained) = match thinking_display {
-            ThinkingBlockDisplay::Automatic => {
+            ThinkingBlockDisplay::Auto => {
+                let is_open = is_user_toggled || is_in_expanded_set;
+                (is_open, false)
+            }
+            ThinkingBlockDisplay::Preview => {
                 let is_open = is_user_toggled || is_in_expanded_set;
                 let is_constrained = is_in_expanded_set && !is_user_toggled;
                 (is_open, is_constrained)
@@ -7103,17 +7234,10 @@ impl ThreadView {
                 };
 
                 active_editor.update_in(cx, |editor, window, cx| {
-                    let singleton = editor
-                        .buffer()
-                        .read(cx)
-                        .read(cx)
-                        .as_singleton()
-                        .map(|(a, b, _)| (a, b));
-                    if let Some((excerpt_id, buffer_id)) = singleton
-                        && let Some(agent_buffer) = agent_location.buffer.upgrade()
-                        && agent_buffer.read(cx).remote_id() == buffer_id
+                    let snapshot = editor.buffer().read(cx).snapshot(cx);
+                    if snapshot.as_singleton().is_some()
+                        && let Some(anchor) = snapshot.anchor_in_excerpt(agent_location.position)
                     {
-                        let anchor = editor::Anchor::in_buffer(excerpt_id, agent_location.position);
                         editor.change_selections(Default::default(), window, cx, |selections| {
                             selections.select_anchor_ranges([anchor..anchor]);
                         })
@@ -8522,6 +8646,14 @@ impl Render for ThreadView {
             .on_action(cx.listener(Self::handle_toggle_command_pattern))
             .on_action(cx.listener(Self::open_permission_dropdown))
             .on_action(cx.listener(Self::open_add_context_menu))
+            .on_action(cx.listener(Self::scroll_output_page_up))
+            .on_action(cx.listener(Self::scroll_output_page_down))
+            .on_action(cx.listener(Self::scroll_output_line_up))
+            .on_action(cx.listener(Self::scroll_output_line_down))
+            .on_action(cx.listener(Self::scroll_output_to_top))
+            .on_action(cx.listener(Self::scroll_output_to_bottom))
+            .on_action(cx.listener(Self::scroll_output_to_previous_message))
+            .on_action(cx.listener(Self::scroll_output_to_next_message))
             .on_action(cx.listener(|this, _: &ToggleFastMode, _window, cx| {
                 this.toggle_fast_mode(cx);
             }))
