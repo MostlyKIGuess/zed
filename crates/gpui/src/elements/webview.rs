@@ -2,14 +2,33 @@
 //!
 //! This element is gated behind the `webview` feature flag.
 //!
-//! On Linux, all webviews run on a single dedicated GTK thread. New webview
-//! requests are sent to it via a channel and created within GTK's main loop.
+//! On macOS, Windows, and Linux/X11, webviews are embedded as child views
+//! inside the GPUI window using wry's `build_as_child()`.
+//!
+//! On Linux/Wayland, webviews open in separate GTK windows on a dedicated
+//! thread because wry's `build_as_child()` does not support Wayland.
 
 use crate::{
-    App, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement, LayoutId, Style,
-    StyleRefinement, Styled, Window, px,
+    App, Bounds, Element, ElementId, GlobalElementId, InspectorElementId, IntoElement, LayoutId,
+    Pixels, Style, StyleRefinement, Styled, Window, px,
 };
 use refineable::Refineable;
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+#[cfg(feature = "webview")]
+static NEXT_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+
+#[cfg(feature = "webview")]
+static ACTIVE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+// wry::WebView contains raw pointers (not Send/Sync), so we use thread-local
+// storage. All GPUI paint calls happen on the main thread.
+#[cfg(feature = "webview")]
+thread_local! {
+    static CHILD_WEBVIEWS: std::cell::RefCell<HashMap<usize, wry::WebView>> =
+        std::cell::RefCell::new(HashMap::new());
+}
 
 #[cfg(all(
     feature = "webview",
@@ -17,8 +36,12 @@ use refineable::Refineable;
     any(target_os = "linux", target_os = "freebsd")
 ))]
 use gtk::glib;
+#[cfg(all(
+    feature = "webview",
+    feature = "gtk",
+    any(target_os = "linux", target_os = "freebsd")
+))]
 use gtk::prelude::*;
-
 #[cfg(all(
     feature = "webview",
     feature = "gtk",
@@ -33,23 +56,28 @@ use wry::WebViewBuilderExtUnix;
 ))]
 mod gtk_thread {
     use super::*;
-    use std::sync::Mutex;
 
-    struct WebViewRequest {
-        id: usize,
-        content: WebViewContent,
+    enum GtkMessage {
+        Create { id: usize, content: WebViewContent },
+        Close { id: usize },
     }
 
-    static CREATED_WEBVIEWS: std::sync::LazyLock<Mutex<std::collections::HashSet<usize>>> =
+    static CREATED: std::sync::LazyLock<Mutex<std::collections::HashSet<usize>>> =
         std::sync::LazyLock::new(|| Mutex::new(std::collections::HashSet::new()));
 
-    static NEXT_ID: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(1);
+    // Populated by delete_event so the GPUI render loop can remove stale entries.
+    static CLOSED_BY_USER: std::sync::LazyLock<Mutex<Vec<usize>>> =
+        std::sync::LazyLock::new(|| Mutex::new(Vec::new()));
 
-    static ACTIVE_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    // gtk::Window isn't Send, so we store them on the GTK thread.
+    thread_local! {
+        static WINDOWS: std::cell::RefCell<HashMap<usize, gtk::Window>> =
+            std::cell::RefCell::new(HashMap::new());
+    }
 
-    static GTK_SENDER: std::sync::LazyLock<Mutex<std::sync::mpsc::Sender<WebViewRequest>>> =
+    static GTK_SENDER: std::sync::LazyLock<Mutex<std::sync::mpsc::Sender<GtkMessage>>> =
         std::sync::LazyLock::new(|| {
-            let (sender, receiver) = std::sync::mpsc::channel::<WebViewRequest>();
+            let (sender, receiver) = std::sync::mpsc::channel::<GtkMessage>();
 
             std::thread::spawn(move || {
                 if let Err(error) = gtk::init() {
@@ -59,8 +87,11 @@ mod gtk_thread {
 
                 let receiver = std::cell::RefCell::new(receiver);
                 glib::timeout_add_local(std::time::Duration::from_millis(50), move || {
-                    while let Ok(request) = receiver.borrow().try_recv() {
-                        create_window(request);
+                    while let Ok(message) = receiver.borrow().try_recv() {
+                        match message {
+                            GtkMessage::Create { id, content } => create_window(id, content),
+                            GtkMessage::Close { id } => close_window(id),
+                        }
                     }
                     glib::ControlFlow::Continue
                 });
@@ -71,7 +102,7 @@ mod gtk_thread {
             Mutex::new(sender)
         });
 
-    fn create_window(request: WebViewRequest) {
+    fn create_window(id: usize, content: WebViewContent) {
         let window = gtk::Window::new(gtk::WindowType::Toplevel);
         window.set_title("Zed WebView");
         window.set_default_size(900, 700);
@@ -82,15 +113,14 @@ mod gtk_thread {
         window.add(&container);
         window.show_all();
 
-        let builder = match &request.content {
+        let builder = match &content {
             WebViewContent::Html(html) => wry::WebViewBuilder::new().with_html(html),
             WebViewContent::Url(url) => wry::WebViewBuilder::new().with_url(url),
         };
 
-        let webview_id = request.id;
         match builder.build_gtk(&container) {
             Ok(webview) => {
-                log::info!("WebView #{} created", webview_id);
+                log::info!("WebView #{} created (Wayland/GTK)", id);
                 ACTIVE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
                 // wry::WebView is dropped when it goes out of scope, which destroys
                 // the underlying WebKitGTK widget. We need it alive as long as the
@@ -98,34 +128,66 @@ mod gtk_thread {
                 std::mem::forget(webview);
             }
             Err(error) => {
-                log::error!("WebView #{}: failed: {}", webview_id, error);
+                log::error!("WebView #{}: failed: {}", id, error);
                 window.close();
                 return;
             }
         }
 
+        let webview_id = id;
         window.connect_delete_event(move |_, _| {
-            CREATED_WEBVIEWS
-                .lock()
-                .unwrap_or_else(|poison| poison.into_inner())
-                .remove(&webview_id);
-            ACTIVE_COUNT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+            let was_tracked =
+                WINDOWS.with(|windows| windows.borrow_mut().remove(&webview_id).is_some());
+            if was_tracked {
+                ACTIVE_COUNT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                CLOSED_BY_USER
+                    .lock()
+                    .unwrap_or_else(|poison| poison.into_inner())
+                    .push(webview_id);
+            }
             glib::Propagation::Proceed
+        });
+
+        WINDOWS.with(|windows| {
+            windows.borrow_mut().insert(id, window);
         });
     }
 
-    pub fn next_id() -> usize {
-        NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    fn close_window(id: usize) {
+        WINDOWS.with(|windows| {
+            if let Some(window) = windows.borrow_mut().remove(&id) {
+                ACTIVE_COUNT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                window.close();
+            }
+        });
     }
 
-    pub fn active_count() -> usize {
-        ACTIVE_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+    pub fn drain_closed() -> Vec<usize> {
+        let mut closed = CLOSED_BY_USER
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        std::mem::take(&mut *closed)
+    }
+
+    pub fn remove_created(id: usize) {
+        CREATED
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner())
+            .remove(&id);
+        let sender = GTK_SENDER
+            .lock()
+            .unwrap_or_else(|poison| poison.into_inner());
+        if let Err(error) = sender.send(GtkMessage::Close { id }) {
+            log::error!(
+                "WebView #{}: failed to send close to GTK thread: {}",
+                id,
+                error
+            );
+        }
     }
 
     pub fn ensure_created(id: usize, content: &WebViewContent) {
-        let mut created = CREATED_WEBVIEWS
-            .lock()
-            .unwrap_or_else(|poison| poison.into_inner());
+        let mut created = CREATED.lock().unwrap_or_else(|poison| poison.into_inner());
         if created.contains(&id) {
             return;
         }
@@ -135,13 +197,111 @@ mod gtk_thread {
         let sender = GTK_SENDER
             .lock()
             .unwrap_or_else(|poison| poison.into_inner());
-        if let Err(error) = sender.send(WebViewRequest {
+        if let Err(error) = sender.send(GtkMessage::Create {
             id,
             content: content.clone(),
         }) {
             log::error!("WebView #{}: failed to send to GTK thread: {}", id, error);
         }
     }
+}
+
+#[cfg(feature = "webview")]
+fn is_wayland() -> bool {
+    #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+    {
+        crate::guess_compositor() == "Wayland"
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "freebsd")))]
+    {
+        false
+    }
+}
+
+#[cfg(feature = "webview")]
+fn to_wry_bounds(bounds: Bounds<Pixels>) -> wry::Rect {
+    wry::Rect {
+        position: wry::dpi::Position::Logical(wry::dpi::LogicalPosition::new(
+            bounds.origin.x.0 as f64,
+            bounds.origin.y.0 as f64,
+        )),
+        size: wry::dpi::Size::Logical(wry::dpi::LogicalSize::new(
+            bounds.size.width.0 as f64,
+            bounds.size.height.0 as f64,
+        )),
+    }
+}
+
+#[cfg(feature = "webview")]
+fn ensure_gtk_init_for_x11() {
+    #[cfg(all(feature = "gtk", any(target_os = "linux", target_os = "freebsd")))]
+    {
+        // wry's build_as_child on X11 internally creates GTK widgets via
+        // gdk_x11_window_foreign_new_for_display, so GTK must be initialized.
+        static INIT: std::sync::Once = std::sync::Once::new();
+        INIT.call_once(|| {
+            if let Err(error) = gtk::init() {
+                log::error!("Failed to initialize GTK for X11 webview: {}", error);
+            }
+        });
+    }
+}
+
+#[cfg(feature = "webview")]
+fn pump_gtk_events_for_x11() {
+    #[cfg(all(feature = "gtk", any(target_os = "linux", target_os = "freebsd")))]
+    {
+        while gtk::events_pending() {
+            gtk::main_iteration();
+        }
+    }
+}
+
+#[cfg(feature = "webview")]
+fn create_child_webview(
+    id: usize,
+    content: &WebViewContent,
+    bounds: Bounds<Pixels>,
+    window: &Window,
+) {
+    ensure_gtk_init_for_x11();
+
+    CHILD_WEBVIEWS.with(|children| {
+        if children.borrow().contains_key(&id) {
+            return;
+        }
+
+        let builder = match content {
+            WebViewContent::Html(html) => wry::WebViewBuilder::new().with_html(html),
+            WebViewContent::Url(url) => wry::WebViewBuilder::new().with_url(url),
+        };
+
+        match builder
+            .with_bounds(to_wry_bounds(bounds))
+            .with_transparent(true)
+            .build_as_child(window)
+        {
+            Ok(webview) => {
+                log::info!("WebView #{} created (child)", id);
+                ACTIVE_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                children.borrow_mut().insert(id, webview);
+            }
+            Err(error) => {
+                log::error!("WebView #{}: build_as_child failed: {}", id, error);
+            }
+        }
+    });
+}
+
+#[cfg(feature = "webview")]
+fn update_child_bounds(id: usize, bounds: Bounds<Pixels>) {
+    CHILD_WEBVIEWS.with(|children| {
+        if let Some(webview) = children.borrow().get(&id) {
+            if let Err(error) = webview.set_bounds(to_wry_bounds(bounds)) {
+                log::error!("WebView #{}: set_bounds failed: {}", id, error);
+            }
+        }
+    });
 }
 
 /// A WebView element for rendering HTML content.
@@ -184,20 +344,11 @@ impl WebView {
 
     /// Allocate a new unique webview ID.
     pub fn next_id() -> usize {
-        #[cfg(all(
-            feature = "webview",
-            feature = "gtk",
-            any(target_os = "linux", target_os = "freebsd")
-        ))]
+        #[cfg(feature = "webview")]
         {
-            gtk_thread::next_id()
+            NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
         }
-
-        #[cfg(not(all(
-            feature = "webview",
-            feature = "gtk",
-            any(target_os = "linux", target_os = "freebsd")
-        )))]
+        #[cfg(not(feature = "webview"))]
         {
             0
         }
@@ -205,27 +356,60 @@ impl WebView {
 
     /// Return the number of currently open webview windows.
     pub fn active_count() -> usize {
+        #[cfg(feature = "webview")]
+        {
+            ACTIVE_COUNT.load(std::sync::atomic::Ordering::Relaxed)
+        }
+        #[cfg(not(feature = "webview"))]
+        {
+            0
+        }
+    }
+
+    /// Returns IDs of webviews that were closed externally (e.g. by the window manager).
+    /// Call this during render to clean up stale entries from your model.
+    pub fn drain_closed() -> Vec<usize> {
         #[cfg(all(
             feature = "webview",
             feature = "gtk",
             any(target_os = "linux", target_os = "freebsd")
         ))]
         {
-            gtk_thread::active_count()
+            gtk_thread::drain_closed()
         }
-
         #[cfg(not(all(
             feature = "webview",
             feature = "gtk",
             any(target_os = "linux", target_os = "freebsd")
         )))]
         {
-            0
+            Vec::new()
         }
     }
 
+    /// Destroy a webview by ID, freeing its resources.
+    pub fn remove(id: usize) {
+        #[cfg(feature = "webview")]
+        {
+            CHILD_WEBVIEWS.with(|children| {
+                if children.borrow_mut().remove(&id).is_some() {
+                    ACTIVE_COUNT.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
+                }
+            });
+
+            #[cfg(all(feature = "gtk", any(target_os = "linux", target_os = "freebsd")))]
+            {
+                gtk_thread::remove_created(id);
+            }
+        }
+
+        #[cfg(not(feature = "webview"))]
+        drop(id);
+    }
+
     /// Open a webview window with HTML content immediately.
-    /// Can be called from click handlers or any non-render context.
+    /// On Wayland this opens a separate GTK window.
+    /// On macOS/Windows/X11 this is a no-op (use the element API instead).
     pub fn open_html(html: impl Into<String>) {
         let html = html.into();
 
@@ -235,7 +419,7 @@ impl WebView {
             any(target_os = "linux", target_os = "freebsd")
         ))]
         {
-            let id = gtk_thread::next_id();
+            let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             gtk_thread::ensure_created(id, &WebViewContent::Html(html));
         }
 
@@ -257,7 +441,7 @@ impl WebView {
             any(target_os = "linux", target_os = "freebsd")
         ))]
         {
-            let id = gtk_thread::next_id();
+            let id = NEXT_ID.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             gtk_thread::ensure_created(id, &WebViewContent::Url(url));
         }
 
@@ -305,7 +489,7 @@ impl Element for WebView {
         &mut self,
         _global_id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        _bounds: crate::Bounds<crate::Pixels>,
+        _bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
         _window: &mut Window,
         _cx: &mut App,
@@ -316,19 +500,29 @@ impl Element for WebView {
         &mut self,
         _global_id: Option<&GlobalElementId>,
         _inspector_id: Option<&InspectorElementId>,
-        _bounds: crate::Bounds<crate::Pixels>,
+        bounds: Bounds<Pixels>,
         _request_layout: &mut Self::RequestLayoutState,
         _prepaint: &mut Self::PrepaintState,
-        _window: &mut Window,
+        window: &mut Window,
         _cx: &mut App,
     ) {
-        #[cfg(all(
-            feature = "webview",
-            feature = "gtk",
-            any(target_os = "linux", target_os = "freebsd")
-        ))]
+        #[cfg(feature = "webview")]
         {
-            gtk_thread::ensure_created(self.id, &self.content);
+            if is_wayland() {
+                // Wayland: separate GTK window (build_as_child not supported)
+                #[cfg(all(feature = "gtk", any(target_os = "linux", target_os = "freebsd")))]
+                gtk_thread::ensure_created(self.id, &self.content);
+            } else {
+                // macOS, Windows, X11: embed as child of the GPUI window
+                let exists =
+                    CHILD_WEBVIEWS.with(|children| children.borrow().contains_key(&self.id));
+                if exists {
+                    update_child_bounds(self.id, bounds);
+                } else {
+                    create_child_webview(self.id, &self.content, bounds, window);
+                }
+                pump_gtk_events_for_x11();
+            }
         }
     }
 }
