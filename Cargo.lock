@@ -16627,7 +16627,6 @@ dependencies = [
  "agent_ui",
  "anyhow",
  "chrono",
- "collections",
  "editor",
  "feature_flags",
  "fs",

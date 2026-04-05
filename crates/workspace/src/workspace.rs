@@ -19,6 +19,7 @@ mod security_modal;
 pub mod shared_screen;
 use db::smol::future::yield_now;
 pub use shared_screen::SharedScreen;
+pub mod focus_follows_mouse;
 mod status_bar;
 pub mod tasks;
 mod theme_preview;
@@ -90,8 +91,8 @@ pub use persistence::{
 };
 use postage::stream::Stream;
 use project::{
-    DirectoryLister, Project, ProjectEntryId, ProjectPath, ResolvedPath, Worktree, WorktreeId,
-    WorktreeSettings,
+    DirectoryLister, Project, ProjectEntryId, ProjectGroupKey, ProjectPath, ResolvedPath, Worktree,
+    WorktreeId, WorktreeSettings,
     debugger::{breakpoint_store::BreakpointStoreEvent, session::ThreadStatus},
     project_settings::ProjectSettings,
     toolchain_store::ToolchainStoreEvent,
@@ -147,8 +148,8 @@ use util::{
 };
 use uuid::Uuid;
 pub use workspace_settings::{
-    AutosaveSetting, BottomDockLayout, RestoreOnStartupBehavior, StatusBarSettings, TabBarSettings,
-    WorkspaceSettings,
+    AutosaveSetting, BottomDockLayout, FocusFollowsMouse, RestoreOnStartupBehavior,
+    StatusBarSettings, TabBarSettings, WorkspaceSettings,
 };
 use zed_actions::{Spawn, feedback::FileBugReport, theme::ToggleMode};
 
@@ -672,7 +673,7 @@ fn prompt_and_open_paths(app_state: Arc<AppState>, options: PathPromptOptions, c
             None,
             None,
             None,
-            OpenMode::Replace,
+            OpenMode::Activate,
             cx,
         );
         cx.spawn(async move |cx| {
@@ -713,7 +714,7 @@ pub fn prompt_for_open_path_and_open(
             if let Some(handle) = multi_workspace_handle {
                 if let Some(task) = handle
                     .update(cx, |multi_workspace, window, cx| {
-                        multi_workspace.open_project(paths, OpenMode::Replace, window, cx)
+                        multi_workspace.open_project(paths, OpenMode::Activate, window, cx)
                     })
                     .log_err()
                 {
@@ -1380,8 +1381,6 @@ pub enum OpenMode {
     /// Add to the window's multi workspace and activate it.
     #[default]
     Activate,
-    /// Replace the currently active workspace, and any of it's linked workspaces
-    Replace,
 }
 
 impl Workspace {
@@ -1921,9 +1920,6 @@ impl Workspace {
                             workspace
                         });
                         match open_mode {
-                            OpenMode::Replace => {
-                                multi_workspace.replace(workspace.clone(), &*window, cx);
-                            }
                             OpenMode::Activate => {
                                 multi_workspace.activate(workspace.clone(), window, cx);
                             }
@@ -2054,6 +2050,10 @@ impl Workspace {
                 opened_items,
             })
         })
+    }
+
+    pub fn project_group_key(&self, cx: &App) -> ProjectGroupKey {
+        self.project.read(cx).project_group_key(cx)
     }
 
     pub fn weak_handle(&self) -> WeakEntity<Self> {
@@ -3409,7 +3409,7 @@ impl Workspace {
 
         let workspace_is_empty = !is_remote && !has_worktree && !has_dirty_items;
         if workspace_is_empty {
-            open_mode = OpenMode::Replace;
+            open_mode = OpenMode::Activate;
         }
 
         let app_state = self.app_state.clone();
