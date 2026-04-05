@@ -51,6 +51,7 @@
           # we'll just put it on `$PATH`:
           nodejs_22
           zig
+          glib-networking
         ];
 
         env =
@@ -73,6 +74,8 @@
             ZED_ZSTD_MUSL_LIB = "${pkgs.pkgsCross.musl64.pkgsStatic.zstd.out}/lib";
             # For aws-lc-sys musl cross-compilation
             CC_x86_64_unknown_linux_musl = "${muslCross.stdenv.cc}/bin/x86_64-unknown-linux-musl-gcc";
+            GIO_EXTRA_MODULES = "${pkgs.glib-networking}/lib/gio/modules";
+            CARGO_TARGET_X86_64_UNKNOWN_LINUX_GNU_LINKER = "${pkgs.llvmPackages.clang}/bin/clang";
           };
       };
     };
