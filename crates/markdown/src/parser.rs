@@ -208,6 +208,140 @@ fn trim_metadata_range(source: &str, range: Range<usize>) -> Range<usize> {
     start..end
 }
 
+/// A standalone display-math block delimited by `$$` on their own lines, e.g.
+///
+/// ```text
+/// $$
+/// \begin{pmatrix} a & b \\ c & d \end{pmatrix}
+/// $$
+/// ```
+///
+/// pulldown_cmark treats math as an *inline* construct parsed within an already
+/// established block. Block-level parsing runs first, so a line inside the block
+/// that looks like a Setext heading underline (a lone `=` or `-`) or a blank line
+/// splits the `$$...$$` region before inline math parsing runs, and no math event
+/// is emitted. We detect these blocks up front and emit the math ourselves so
+/// they survive regardless of their inner content.
+struct DisplayMathBlock {
+    /// Byte range of the whole block, including the opening and closing fences.
+    fence_range: Range<usize>,
+    /// The formula text between the fences (delimiters stripped).
+    content: SharedString,
+}
+
+/// Scans `text` for standalone display-math blocks (`$$` on their own lines),
+/// skipping any that fall inside fenced code blocks (``` ``` ``` or `~~~`).
+fn extract_standalone_display_math(text: &str) -> Vec<DisplayMathBlock> {
+    fn is_display_fence(line: &str) -> bool {
+        // Must not be indented far enough to be an indented code block, and the
+        // only non-whitespace content on the line is `$$`.
+        line.len() - line.trim_start().len() < 4 && line.trim() == "$$"
+    }
+
+    fn code_fence_marker(line: &str) -> Option<char> {
+        let trimmed = line.trim_start();
+        if line.len() - trimmed.len() >= 4 {
+            return None;
+        }
+        let marker = trimmed.chars().next()?;
+        if (marker == '`' || marker == '~') && trimmed.chars().take(3).all(|c| c == marker) {
+            Some(marker)
+        } else {
+            None
+        }
+    }
+
+    let mut blocks = Vec::new();
+    let mut in_code_fence: Option<char> = None;
+
+    // (byte_offset_of_line_start, line_without_trailing_newline)
+    let lines: Vec<(usize, &str)> = {
+        let mut result = Vec::new();
+        let mut offset = 0;
+        for line in text.split_inclusive('\n') {
+            let content = line.strip_suffix('\n').unwrap_or(line);
+            let content = content.strip_suffix('\r').unwrap_or(content);
+            result.push((offset, content));
+            offset += line.len();
+        }
+        result
+    };
+
+    let mut i = 0;
+    while i < lines.len() {
+        let (line_start, line) = lines[i];
+
+        if let Some(marker) = in_code_fence {
+            if code_fence_marker(line) == Some(marker) {
+                in_code_fence = None;
+            }
+            i += 1;
+            continue;
+        }
+
+        if let Some(marker) = code_fence_marker(line) {
+            in_code_fence = Some(marker);
+            i += 1;
+            continue;
+        }
+
+        if is_display_fence(line) {
+            // Look for a matching closing fence that is also on its own line.
+            // If we hit an inline `$$` first (e.g. `\end{pmatrix}$$` or a
+            // formula that closes at the end of a line), this block isn't in the
+            // standalone-fence style we handle, so we bail out and let
+            // pulldown_cmark parse it normally rather than swallowing the inline
+            // `$$` into the formula content.
+            let mut close_idx = None;
+            for j in (i + 1)..lines.len() {
+                let candidate = lines[j].1;
+                if is_display_fence(candidate) {
+                    close_idx = Some(j);
+                    break;
+                }
+                if candidate.contains("$$") {
+                    break;
+                }
+            }
+            if let Some(close_idx) = close_idx {
+                let (close_start, close_line) = lines[close_idx];
+                let content_start = lines[i + 1].0;
+                let content_end = close_start;
+                let content = text[content_start..content_end]
+                    .trim_matches(['\n', '\r'])
+                    .to_string();
+                blocks.push(DisplayMathBlock {
+                    fence_range: line_start..close_start + close_line.len(),
+                    content: SharedString::from(content),
+                });
+                i = close_idx + 1;
+                continue;
+            }
+        }
+
+        i += 1;
+    }
+
+    blocks
+}
+
+/// Returns a copy of `text` with every display-math block replaced by spaces
+/// (newlines preserved), so pulldown_cmark sees blank lines there and byte
+/// offsets for all other events stay identical to the original source.
+fn mask_display_math(text: &str, blocks: &[DisplayMathBlock]) -> String {
+    let mut masked = text.as_bytes().to_vec();
+    for block in blocks {
+        for byte in &mut masked[block.fence_range.clone()] {
+            if *byte != b'\n' && *byte != b'\r' {
+                *byte = b' ';
+            }
+        }
+    }
+    // Safe: we only replaced non-newline bytes with ASCII spaces, and the
+    // original text was valid UTF-8.
+    String::from_utf8(masked).expect("masking only substitutes ASCII spaces")
+}
+
 pub(crate) fn parse_markdown_with_options(
     text: &str,
     parse_html: bool,
@@ -229,10 +363,50 @@ pub(crate) fn parse_markdown_with_options(
     } else {
         PARSE_OPTIONS
     };
-    let mut parser = Parser::new_ext(text, parse_options)
+
+    // Standalone `$$...$$` display-math blocks are extracted and emitted directly,
+    // masking their source so pulldown_cmark's block-level parsing can't split them
+    // (e.g. on a lone `=`/`-` Setext underline or a blank line). See
+    // `extract_standalone_display_math`.
+    let display_math_blocks = extract_standalone_display_math(text);
+    let masked_text;
+    let parse_input: &str = if display_math_blocks.is_empty() {
+        text
+    } else {
+        masked_text = mask_display_math(text, &display_math_blocks);
+        &masked_text
+    };
+    let mut next_math_block = 0;
+    let flush_display_math =
+        |state: &mut ParseState, next_math_block: &mut usize, before: usize| {
+            while *next_math_block < display_math_blocks.len()
+                && display_math_blocks[*next_math_block].fence_range.start < before
+            {
+                let block = &display_math_blocks[*next_math_block];
+                state.push_event(
+                    block.fence_range.clone(),
+                    MarkdownEvent::Start(MarkdownTag::Paragraph),
+                );
+                state.push_event(
+                    block.fence_range.clone(),
+                    MarkdownEvent::Math {
+                        display: true,
+                        content: block.content.clone(),
+                    },
+                );
+                state.push_event(
+                    block.fence_range.clone(),
+                    MarkdownEvent::End(MarkdownTagEnd::Paragraph),
+                );
+                *next_math_block += 1;
+            }
+        };
+
+    let mut parser = Parser::new_ext(parse_input, parse_options)
         .into_offset_iter()
         .peekable();
     while let Some((pulldown_event, range)) = parser.next() {
+        flush_display_math(&mut state, &mut next_math_block, range.start + 1);
         if within_metadata && !parse_metadata_blocks {
             if let pulldown_cmark::Event::End(pulldown_cmark::TagEnd::MetadataBlock(_)) =
                 pulldown_event
@@ -646,6 +820,7 @@ pub(crate) fn parse_markdown_with_options(
             ),
         }
     }
+    flush_display_math(&mut state, &mut next_math_block, usize::MAX);
 
     let heading_slugs = if parse_heading_slugs {
         build_heading_slugs(text, &state.events)
@@ -929,6 +1104,117 @@ mod tests {
     const UNWANTED_OPTIONS: Options = Options::empty()
         .union(Options::ENABLE_DEFINITION_LIST)
         .union(Options::ENABLE_WIKILINKS);
+
+    fn display_math_contents(md: &str) -> Vec<String> {
+        let parsed = parse_markdown_with_options(md, false, false, false);
+        parsed
+            .events
+            .iter()
+            .filter_map(|(_, e)| match e {
+                MarkdownEvent::Math {
+                    display: true,
+                    content,
+                } => Some(content.to_string()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn standalone_display_math_survives_setext_underline() {
+        // A lone `=` line previously turned the preceding line into a Setext
+        // heading, splitting the `$$` block so no math event was emitted.
+        let broken = "$$\na\n=\nb\n$$";
+        let math = display_math_contents(broken);
+        assert_eq!(math, vec!["a\n=\nb".to_string()]);
+
+        // A lone `-` (Setext H2 underline) must be handled too.
+        let dash = "$$\na\n-\nb\n$$";
+        assert_eq!(display_math_contents(dash), vec!["a\n-\nb".to_string()]);
+    }
+
+    #[test]
+    fn standalone_display_math_matrix_block() {
+        let markdown = concat!(
+            "## Matrices\n\n",
+            "$$\n",
+            "\\begin{pmatrix}\n",
+            "a & b \\\\\n",
+            "c & d\n",
+            "\\end{pmatrix}\n",
+            "\\begin{pmatrix}\n",
+            "x \\\\\n",
+            "y\n",
+            "\\end{pmatrix}\n",
+            "=\n",
+            "\\begin{pmatrix}\n",
+            "ax + by \\\\\n",
+            "cx + dy\n",
+            "\\end{pmatrix}\n",
+            "$$\n\n",
+            "## Next\n",
+        );
+        let math = display_math_contents(markdown);
+        assert_eq!(math.len(), 1, "expected exactly one display math block");
+        assert!(math[0].contains("\\begin{pmatrix}"));
+        assert!(math[0].contains('='));
+
+        // The surrounding headings must still be parsed as headings.
+        let parsed = parse_markdown_with_options(markdown, false, false, false);
+        let heading_count = parsed
+            .events
+            .iter()
+            .filter(|(_, e)| matches!(e, MarkdownEvent::Start(MarkdownTag::Heading { .. })))
+            .count();
+        assert_eq!(heading_count, 2, "both headings should remain");
+    }
+
+    #[test]
+    fn inline_closing_fence_is_not_swallowed() {
+        // An opening standalone `$$` whose block is closed by an inline `$$`
+        // (`\end{pmatrix}$$`) must not be extracted with the trailing `$$`
+        // captured into the content. It is left to pulldown_cmark instead.
+        let md = "$$\n\\begin{pmatrix} a \\end{pmatrix}$$";
+        for content in display_math_contents(md) {
+            assert!(
+                !content.contains("$$"),
+                "content must not contain the `$$` delimiter, got: {content:?}"
+            );
+        }
+
+        // Two formulas that each close with an inline `$$` must not be merged
+        // into one block spanning both.
+        let md2 = "$$\na = 0$$\n\n$$\nb = 1$$";
+        for content in display_math_contents(md2) {
+            assert!(
+                !content.contains("$$"),
+                "content must not contain `$$`, got: {content:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn display_math_inside_code_fence_is_not_extracted() {
+        let markdown = concat!(
+            "```latex\n",
+            "$$\n",
+            "a = b\n",
+            "$$\n",
+            "```\n",
+        );
+        assert!(
+            display_math_contents(markdown).is_empty(),
+            "math inside a code fence must not be rendered as math"
+        );
+    }
+
+    #[test]
+    fn single_line_display_math_still_handled_by_pulldown() {
+        // Single-line `$$...$$` is not a standalone fence block; pulldown handles
+        // it (and yields the content verbatim, without trimming).
+        let math = display_math_contents("$$ a = b $$");
+        assert_eq!(math, vec![" a = b ".to_string()]);
+    }
 
     #[test]
     fn all_options_considered() {
