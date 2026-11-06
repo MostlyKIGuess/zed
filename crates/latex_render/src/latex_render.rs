@@ -16,7 +16,7 @@ use ratex_types::display_item::{DisplayItem, DisplayList};
 use ratex_types::path_command::PathCommand;
 use std::borrow::Cow;
 use std::collections::VecDeque;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 static UNDERSCORE_ESCAPE: &str = r"\_";
@@ -372,6 +372,21 @@ impl FormulaCache {
     }
 }
 
+/// Coalesces completion notifications: while one is waiting to be delivered,
+/// further completions don't send another.
+struct CompletionNotifier {
+    scheduled: Arc<AtomicBool>,
+    sender: mpsc::UnboundedSender<()>,
+}
+
+impl CompletionNotifier {
+    fn formula_completed(&self) {
+        if !self.scheduled.swap(true, Ordering::AcqRel) && self.sender.unbounded_send(()).is_err() {
+            log::debug!("latex_render: skipping notify for dropped view");
+        }
+    }
+}
+
 /// Counters for observing renderer work, used by regression tests.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct LatexRendererStats {
@@ -409,21 +424,27 @@ pub struct LatexRenderer {
     cache: Arc<Mutex<FormulaCache>>,
     executor: BackgroundExecutor,
     counters: Arc<RendererCounters>,
-    on_render_complete: Option<Arc<dyn Fn() + Send + Sync>>,
+    notifier: Option<Arc<CompletionNotifier>>,
     _notify_task: Option<Task<()>>,
 }
 
 impl LatexRenderer {
-    /// Build a renderer wired to re-render the owning view whenever a formula
-    /// finishes parsing in the background. Spawns and owns the foreground
+    /// Build a renderer wired to re-render the owning view whenever formulas
+    /// finish parsing in the background. Spawns and owns the foreground
     /// bridge task internally, so callers don't have to thread an mpsc channel through their setup code.
     pub fn for_view<T: 'static>(executor: BackgroundExecutor, cx: &mut Context<T>) -> Self {
         let counters = Arc::new(RendererCounters::default());
-        let (tx, mut rx) = mpsc::unbounded::<()>();
+        let scheduled = Arc::new(AtomicBool::new(false));
+        let (sender, mut receiver) = mpsc::unbounded::<()>();
         let notify_task = cx.spawn({
             let counters = counters.clone();
+            let scheduled = scheduled.clone();
             async move |this, cx| {
-                while rx.next().await.is_some() {
+                while receiver.next().await.is_some() {
+                    // Cleared before notifying: a formula finishing after this
+                    // point schedules another notification, so the last
+                    // completion of a batch is never dropped.
+                    scheduled.store(false, Ordering::Release);
                     if this.update(cx, |_, cx| cx.notify()).is_err() {
                         break;
                     }
@@ -435,11 +456,7 @@ impl LatexRenderer {
             cache: Arc::new(Mutex::new(FormulaCache::default())),
             executor,
             counters,
-            on_render_complete: Some(Arc::new(move || {
-                if tx.unbounded_send(()).is_err() {
-                    log::debug!("latex_render: skipping notify for dropped view");
-                }
-            })),
+            notifier: Some(Arc::new(CompletionNotifier { scheduled, sender })),
             _notify_task: Some(notify_task),
         }
     }
@@ -504,7 +521,7 @@ impl LatexRenderer {
     fn spawn_worker(&self) {
         let cache = self.cache.clone();
         let counters = self.counters.clone();
-        let on_complete = self.on_render_complete.clone();
+        let notifier = self.notifier.clone();
         self.executor
             .spawn(async move {
                 loop {
@@ -518,8 +535,8 @@ impl LatexRenderer {
                         Err(error) => CacheState::Ready(Err(Arc::new(error.to_string()))),
                     };
                     let stored = cache.lock().complete(&job, state);
-                    if stored && let Some(callback) = &on_complete {
-                        callback();
+                    if stored && let Some(notifier) = &notifier {
+                        notifier.formula_completed();
                     }
                 }
             })
@@ -1566,6 +1583,49 @@ mod tests {
             panic!("both layouts should be ready");
         };
         assert_ne!(inline.metrics.height, display.metrics.height);
+    }
+
+    #[gpui::test]
+    fn completed_batch_is_coalesced_into_few_notifications(cx: &mut gpui::TestAppContext) {
+        let (_host, renderer) = test_renderer(cx);
+        let formulas: Vec<String> = (0..200).map(synthetic_formula).collect();
+        render_pass(&renderer, &formulas, false);
+        cx.run_until_parked();
+        let stats = renderer.stats();
+        assert_eq!(stats.pending_formulas, 0);
+        assert!(
+            (1..=MAX_CONCURRENT_JOBS as u64).contains(&stats.notifications),
+            "expected a coalesced notification, got {} for {} formulas",
+            stats.notifications,
+            formulas.len()
+        );
+    }
+
+    #[gpui::test]
+    fn completion_after_a_delivered_notification_notifies_again(cx: &mut gpui::TestAppContext) {
+        let (_host, renderer) = test_renderer(cx);
+        let first: Vec<String> = (0..20).map(synthetic_formula).collect();
+        render_pass(&renderer, &first, false);
+        cx.run_until_parked();
+        let delivered = renderer.stats().notifications;
+        assert!(delivered >= 1);
+
+        render_pass(&renderer, &[synthetic_formula(1000)], false);
+        cx.run_until_parked();
+        assert_eq!(renderer.stats().notifications, delivered + 1);
+        assert_eq!(renderer.stats().pending_formulas, 0);
+    }
+
+    #[gpui::test]
+    fn dropping_the_view_stops_notifications(cx: &mut gpui::TestAppContext) {
+        let (host, renderer) = test_renderer(cx);
+        let formulas: Vec<String> = (0..20).map(synthetic_formula).collect();
+        render_pass(&renderer, &formulas, false);
+        drop(host);
+        cx.run_until_parked();
+        let stats = renderer.stats();
+        assert_eq!(stats.notifications, 0);
+        assert_eq!(stats.pending_formulas, 0);
     }
 
     #[test]

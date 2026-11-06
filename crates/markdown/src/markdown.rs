@@ -6506,6 +6506,11 @@ mod tests {
             "each unique formula should be parsed once"
         );
         assert!(settled.cached_formulas >= unique_formulas);
+        assert!(
+            settled.notifications <= 8,
+            "notifications should be bounded by batches, got {} for {unique_formulas} formulas",
+            settled.notifications
+        );
 
         layout(cx);
         let unchanged = renderer.stats();
