@@ -19,8 +19,6 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
-static UNDERSCORE_ESCAPE: &str = r"\_";
-
 // Glyph outline coordinates come from ab_glyph in font design units. Most KaTeX
 // faces report 1000 units per em; fall back to that when the face doesn't advertise.
 const DEFAULT_UNITS_PER_EM: f32 = 1000.0;
@@ -501,7 +499,7 @@ impl LatexRenderer {
             if standalone {
                 cache.begin_pass();
             }
-            let result = cache.request(&source, display);
+            let result = cache.request(source, display);
             if standalone {
                 cache.end_pass();
             }
@@ -544,14 +542,11 @@ impl LatexRenderer {
     }
 }
 
-/// Prettier rewrites `_` inside math as `\_`, which breaks subscripts.
-fn sanitize_source(source: &str) -> Cow<'_, str> {
-    let trimmed = source.trim();
-    if trimmed.contains(UNDERSCORE_ESCAPE) {
-        Cow::Owned(trimmed.replace(UNDERSCORE_ESCAPE, "_"))
-    } else {
-        Cow::Borrowed(trimmed)
-    }
+/// Trims delimiter padding only. The formula is otherwise passed through
+/// unchanged: `\_` is a literal underscore in LaTeX and `_` starts a subscript,
+/// so rewriting one into the other would change what the author wrote.
+fn sanitize_source(source: &str) -> &str {
+    source.trim()
 }
 
 fn parse_and_layout(source: &str, display: bool) -> Result<PreparedFormula> {
@@ -1374,20 +1369,16 @@ mod tests {
     use gpui::AppContext as _;
 
     #[test]
-    fn sanitize_reverses_prettier_underscore_escape() {
+    fn sanitize_only_trims_padding() {
         assert_eq!(
-            sanitize_source(r"x\_{1,2} = \frac{-b}{2a} \tag{1}"),
-            r"x_{1,2} = \frac{-b}{2a} \tag{1}"
+            sanitize_source(r"  \texttt{sample\_label} "),
+            r"\texttt{sample\_label}"
         );
-    }
-
-    #[test]
-    fn sanitize_borrows_when_nothing_to_rewrite() {
-        // The per-frame lookup must not allocate a key.
-        assert!(matches!(
-            sanitize_source("  x^2 + y^2 = z^2  "),
-            Cow::Borrowed("x^2 + y^2 = z^2")
-        ));
+        assert_eq!(
+            sanitize_source(r" x\_{1,2} = \frac{-b}{2a} \tag{1}"),
+            r"x\_{1,2} = \frac{-b}{2a} \tag{1}"
+        );
+        assert_eq!(sanitize_source("  x_1  "), "x_1");
     }
 
     fn failed_state() -> CacheState {
@@ -1626,6 +1617,41 @@ mod tests {
         let stats = renderer.stats();
         assert_eq!(stats.notifications, 0);
         assert_eq!(stats.pending_formulas, 0);
+    }
+
+    #[gpui::test]
+    fn renderer_preserves_literal_underscores(cx: &mut gpui::TestAppContext) {
+        let (_host, renderer) = test_renderer(cx);
+        let sources = [
+            r"x_1".to_string(),
+            r"\texttt{sample\_label}".to_string(),
+            r"\mathrm{CACHE\_TOKEN}".to_string(),
+        ];
+        render_pass(&renderer, &sources, false);
+        cx.run_until_parked();
+        for source in &sources {
+            let rendered = renderer
+                .render(source, false)
+                .expect("formula should be ready");
+            let direct = parse_and_layout(source, false).map_err(|error| error.to_string());
+            match (&rendered, &direct) {
+                (Ok(rendered), Ok(direct)) => assert_eq!(
+                    rendered.metrics.width, direct.metrics.width,
+                    "renderer changed {source}"
+                ),
+                (Err(_), Err(_)) => {}
+                _ => panic!("renderer and direct layout disagree for {source}"),
+            }
+        }
+    }
+
+    #[test]
+    fn literal_underscore_is_not_a_subscript() {
+        let literal = parse_and_layout(r"\mathrm{CACHE\_TOKEN}", false).expect("literal lays out");
+        let subscript =
+            parse_and_layout(r"\mathrm{CACHE_TOKEN}", false).expect("subscript lays out");
+        assert_ne!(literal.metrics.width, subscript.metrics.width);
+        parse_and_layout(r"\texttt{sample\_label}", false).expect("texttt literal lays out");
     }
 
     #[test]

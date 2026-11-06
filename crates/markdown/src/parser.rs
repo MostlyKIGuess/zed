@@ -2490,6 +2490,44 @@ $$";
     }
 
     #[test]
+    fn math_content_keeps_underscores_verbatim() {
+        assert_eq!(inline_math_contents("a $x_1$ b"), vec!["x_1".to_string()]);
+        assert_eq!(
+            inline_math_contents(r"a $\texttt{sample\_label}$ b"),
+            vec![r"\texttt{sample\_label}".to_string()]
+        );
+        assert_eq!(
+            inline_math_contents(r"a $\mathrm{CACHE\_TOKEN}$ b"),
+            vec![r"\mathrm{CACHE\_TOKEN}".to_string()]
+        );
+        assert_eq!(
+            inline_math_contents(r"padded $ \text{a\_b} $ text"),
+            vec![r"\text{a\_b}".to_string()]
+        );
+        let display = display_math_contents("$$\n\\text{row\\_label} = x_1\n$$\n");
+        assert_eq!(display.len(), 1, "{display:?}");
+        assert_eq!(display[0].trim(), r"\text{row\_label} = x_1");
+    }
+
+    #[test]
+    fn math_inside_code_spans_and_fences_stays_code() {
+        let source = "Inline code: `$not_math$` and `\\texttt{code\\_token}`.\n\n```text\n$$not display math$$\n$not inline math$\n```\n";
+        assert!(inline_math_contents(source).is_empty());
+        assert!(display_math_contents(source).is_empty());
+        let code: Vec<&str> = parse_markdown_with_options(source, false, false, false)
+            .events
+            .into_iter()
+            .filter_map(|(range, event)| match event {
+                MarkdownEvent::Code => Some(&source[range]),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(code.len(), 2, "{code:?}");
+        assert!(code[0].contains("$not_math$"), "{code:?}");
+        assert!(code[1].contains(r"\texttt{code\_token}"), "{code:?}");
+    }
+
+    #[test]
     fn unterminated_display_math_is_left_alone() {
         assert!(normalize_math_for_parsing("$$\na = b\n").is_none());
     }
