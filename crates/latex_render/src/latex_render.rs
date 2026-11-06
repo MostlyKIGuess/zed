@@ -15,6 +15,8 @@ use ratex_types::color::Color as RatexColor;
 use ratex_types::display_item::{DisplayItem, DisplayList};
 use ratex_types::path_command::PathCommand;
 use std::borrow::Cow;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, OnceLock};
 
 static UNDERSCORE_ESCAPE: &str = r"\_";
@@ -197,25 +199,50 @@ pub struct PreparedFormula {
 
 #[derive(Clone)]
 enum CacheState {
+    /// Queued for a background worker.
     Pending,
+    /// A background worker is parsing and laying out the formula.
+    Running,
     Ready(Result<PreparedFormula, Arc<String>>),
+}
+
+impl CacheState {
+    fn is_ready(&self) -> bool {
+        matches!(self, Self::Ready(_))
+    }
 }
 
 struct CacheEntry {
     state: CacheState,
     last_used: u64,
+    /// The render pass that last requested this entry.
+    generation: u64,
 }
 
-// Editing leaves an entry per prefix typed. Visible formulas are re-requested
-// every frame, so their timestamps keep them out of the evicted set.
+// The limit is soft. A layout pass requests every formula of its document, and
+// entries requested by the current pass are never evicted, so a document with
+// more formulas than this keeps its whole working set. Entries left behind by
+// edits (one per prefix typed) or removed content are evicted when a pass ends.
 const MAX_CACHE_ENTRIES: usize = 512;
 const CACHE_EVICTION_BATCH: usize = MAX_CACHE_ENTRIES / 4;
+// Parsing and layout is CPU-bound; one math-heavy document must not occupy
+// every background thread.
+const MAX_CONCURRENT_JOBS: usize = 4;
+
+struct FormulaJob {
+    source: String,
+    display: bool,
+}
 
 #[derive(Default)]
 struct FormulaCache {
     inline: HashMap<String, CacheEntry>,
     display: HashMap<String, CacheEntry>,
     clock: u64,
+    generation: u64,
+    open_passes: usize,
+    queue: VecDeque<FormulaJob>,
+    workers: usize,
 }
 
 impl FormulaCache {
@@ -227,35 +254,161 @@ impl FormulaCache {
         }
     }
 
+    fn len(&self) -> usize {
+        self.inline.len() + self.display.len()
+    }
+
     fn tick(&mut self) -> u64 {
         self.clock += 1;
         self.clock
     }
 
-    fn evict_if_needed(&mut self) {
-        if self.inline.len() + self.display.len() <= MAX_CACHE_ENTRIES {
+    fn begin_pass(&mut self) {
+        if self.open_passes == 0 {
+            self.generation += 1;
+        }
+        self.open_passes += 1;
+    }
+
+    fn end_pass(&mut self) {
+        self.open_passes = self.open_passes.saturating_sub(1);
+        if self.open_passes == 0 {
+            self.evict_stale();
+        }
+    }
+
+    /// Looks the formula up, queueing a job for it on a miss.
+    fn request(&mut self, source: &str, display: bool) -> Option<Result<PreparedFormula, String>> {
+        let clock = self.tick();
+        let generation = self.generation;
+        if let Some(entry) = self.entries(display).get_mut(source) {
+            entry.last_used = clock;
+            entry.generation = generation;
+            return match &entry.state {
+                CacheState::Pending | CacheState::Running => None,
+                CacheState::Ready(result) => {
+                    Some(result.clone().map_err(|error| error.as_ref().clone()))
+                }
+            };
+        }
+        self.entries(display).insert(
+            source.to_owned(),
+            CacheEntry {
+                state: CacheState::Pending,
+                last_used: clock,
+                generation,
+            },
+        );
+        self.queue.push_back(FormulaJob {
+            source: source.to_owned(),
+            display,
+        });
+        None
+    }
+
+    /// Evicts least recently used entries that the current pass did not request,
+    /// leaving some headroom so the next few edits don't evict again.
+    fn evict_stale(&mut self) {
+        if self.len() <= MAX_CACHE_ENTRIES {
             return;
         }
-        let mut timestamps: Vec<u64> = self
+        let excess = self.len() - (MAX_CACHE_ENTRIES - CACHE_EVICTION_BATCH);
+        let generation = self.generation;
+        let mut stale: Vec<(u64, bool, String)> = self
             .inline
-            .values()
-            .chain(self.display.values())
-            .map(|entry| entry.last_used)
+            .iter()
+            .map(|(source, entry)| (source, entry, false))
+            .chain(
+                self.display
+                    .iter()
+                    .map(|(source, entry)| (source, entry, true)),
+            )
+            .filter(|(_, entry, _)| entry.generation < generation)
+            .map(|(source, entry, display)| (entry.last_used, display, source.clone()))
             .collect();
-        let cutoff_index = CACHE_EVICTION_BATCH.min(timestamps.len() - 1);
-        let (_, cutoff, _) = timestamps.select_nth_unstable(cutoff_index);
-        let cutoff = *cutoff;
-        let keep = |entry: &CacheEntry| {
-            entry.last_used > cutoff || matches!(entry.state, CacheState::Pending)
-        };
-        self.inline.retain(|_, entry| keep(entry));
-        self.display.retain(|_, entry| keep(entry));
+        if stale.len() > excess {
+            stale.select_nth_unstable_by_key(excess, |(last_used, _, _)| *last_used);
+            stale.truncate(excess);
+        }
+        for (_, display, source) in stale {
+            self.entries(display).remove(&source);
+        }
+    }
+
+    /// Reserves workers for queued jobs, up to the concurrency limit.
+    fn claim_workers(&mut self) -> usize {
+        let count = MAX_CONCURRENT_JOBS
+            .saturating_sub(self.workers)
+            .min(self.queue.len());
+        self.workers += count;
+        count
+    }
+
+    /// Hands a worker its next job, skipping jobs whose formula was evicted or
+    /// already finished. Releases the worker when the queue is empty.
+    fn next_job(&mut self) -> Option<FormulaJob> {
+        while let Some(job) = self.queue.pop_front() {
+            if let Some(entry) = self.entries(job.display).get_mut(&job.source)
+                && matches!(entry.state, CacheState::Pending)
+            {
+                entry.state = CacheState::Running;
+                return Some(job);
+            }
+        }
+        self.workers = self.workers.saturating_sub(1);
+        None
+    }
+
+    /// Stores a finished layout. Returns false when the formula is no longer
+    /// cached, in which case the result is dropped.
+    fn complete(&mut self, job: &FormulaJob, state: CacheState) -> bool {
+        match self.entries(job.display).get_mut(&job.source) {
+            Some(entry) if !entry.state.is_ready() => {
+                entry.state = state;
+                true
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Counters for observing renderer work, used by regression tests.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LatexRendererStats {
+    /// Formulas currently held by the cache, pending or ready.
+    pub cached_formulas: usize,
+    /// Cached formulas whose parse and layout has not finished.
+    pub pending_formulas: usize,
+    /// Parse and layout jobs started since the renderer was created.
+    pub jobs_started: u64,
+    /// View notifications delivered since the renderer was created.
+    pub notifications: u64,
+}
+
+#[derive(Default)]
+struct RendererCounters {
+    jobs_started: AtomicU64,
+    notifications: AtomicU64,
+}
+
+/// Marks one layout of a whole document. Every formula requested while the
+/// pass is open belongs to the document's working set and is protected from
+/// eviction; stale entries are evicted when the guard drops.
+#[must_use = "the pass ends when the guard is dropped"]
+pub struct LatexRenderPass {
+    cache: Arc<Mutex<FormulaCache>>,
+}
+
+impl Drop for LatexRenderPass {
+    fn drop(&mut self) {
+        self.cache.lock().end_pass();
     }
 }
 
 pub struct LatexRenderer {
     cache: Arc<Mutex<FormulaCache>>,
     executor: BackgroundExecutor,
+    counters: Arc<RendererCounters>,
     on_render_complete: Option<Arc<dyn Fn() + Send + Sync>>,
     _notify_task: Option<Task<()>>,
 }
@@ -265,17 +418,23 @@ impl LatexRenderer {
     /// finishes parsing in the background. Spawns and owns the foreground
     /// bridge task internally, so callers don't have to thread an mpsc channel through their setup code.
     pub fn for_view<T: 'static>(executor: BackgroundExecutor, cx: &mut Context<T>) -> Self {
+        let counters = Arc::new(RendererCounters::default());
         let (tx, mut rx) = mpsc::unbounded::<()>();
-        let notify_task = cx.spawn(async move |this, cx| {
-            while rx.next().await.is_some() {
-                if this.update(cx, |_, cx| cx.notify()).is_err() {
-                    break;
+        let notify_task = cx.spawn({
+            let counters = counters.clone();
+            async move |this, cx| {
+                while rx.next().await.is_some() {
+                    if this.update(cx, |_, cx| cx.notify()).is_err() {
+                        break;
+                    }
+                    counters.notifications.fetch_add(1, Ordering::Relaxed);
                 }
             }
         });
         Self {
             cache: Arc::new(Mutex::new(FormulaCache::default())),
             executor,
+            counters,
             on_render_complete: Some(Arc::new(move || {
                 if tx.unbounded_send(()).is_err() {
                     log::debug!("latex_render: skipping notify for dropped view");
@@ -285,66 +444,86 @@ impl LatexRenderer {
         }
     }
 
+    /// Opens a layout pass over a whole document. Hold the returned guard until
+    /// every formula of the document has been requested.
+    pub fn begin_render_pass(&self) -> LatexRenderPass {
+        self.cache.lock().begin_pass();
+        LatexRenderPass {
+            cache: self.cache.clone(),
+        }
+    }
+
+    pub fn stats(&self) -> LatexRendererStats {
+        let cache = self.cache.lock();
+        let pending_formulas = cache
+            .inline
+            .values()
+            .chain(cache.display.values())
+            .filter(|entry| !entry.state.is_ready())
+            .count();
+        LatexRendererStats {
+            cached_formulas: cache.len(),
+            pending_formulas,
+            jobs_started: self.counters.jobs_started.load(Ordering::Relaxed),
+            notifications: self.counters.notifications.load(Ordering::Relaxed),
+        }
+    }
+
     /// Returns `None` while parsing/layout is still in progress. Returns
     /// `Some(Ok(...))` with the cached display list once ready, or `Some(Err(...))`
     /// if parsing failed.
     ///
     /// Colorless: laying out in black lets one entry serve every theme.
     pub fn render(&self, source: &str, display: bool) -> Option<Result<PreparedFormula, String>> {
-        let clean_source = sanitize_source(source);
-
-        let owned_source = {
+        let source = sanitize_source(source);
+        let (result, workers) = {
             let mut cache = self.cache.lock();
-            let clock = cache.tick();
-            if let Some(entry) = cache.entries(display).get_mut(clean_source.as_ref()) {
-                entry.last_used = clock;
-                return match &entry.state {
-                    CacheState::Pending => None,
-                    CacheState::Ready(result) => {
-                        Some(result.clone().map_err(|error| error.as_ref().clone()))
-                    }
-                };
+            // A request outside any pass is a pass of its own, so callers that
+            // never open passes still get a bounded cache.
+            let standalone = cache.open_passes == 0;
+            if standalone {
+                cache.begin_pass();
             }
-            let owned_source = clean_source.into_owned();
-            cache.entries(display).insert(
-                owned_source.clone(),
-                CacheEntry {
-                    state: CacheState::Pending,
-                    last_used: clock,
-                },
-            );
-            cache.evict_if_needed();
-            owned_source
+            let result = cache.request(&source, display);
+            if standalone {
+                cache.end_pass();
+            }
+            let workers = if result.is_none() {
+                cache.claim_workers()
+            } else {
+                0
+            };
+            (result, workers)
         };
+        for _ in 0..workers {
+            self.spawn_worker();
+        }
+        result
+    }
 
+    fn spawn_worker(&self) {
+        let cache = self.cache.clone();
+        let counters = self.counters.clone();
+        let on_complete = self.on_render_complete.clone();
         self.executor
-            .spawn({
-                let cache = self.cache.clone();
-                let on_complete = self.on_render_complete.clone();
-                async move {
-                    let state = match parse_and_layout(&owned_source, display) {
+            .spawn(async move {
+                loop {
+                    let job = cache.lock().next_job();
+                    let Some(job) = job else {
+                        break;
+                    };
+                    counters.jobs_started.fetch_add(1, Ordering::Relaxed);
+                    let state = match parse_and_layout(&job.source, job.display) {
                         Ok(prepared) => CacheState::Ready(Ok(prepared)),
                         Err(error) => CacheState::Ready(Err(Arc::new(error.to_string()))),
                     };
-                    {
-                        let mut cache = cache.lock();
-                        let clock = cache.tick();
-                        cache.entries(display).insert(
-                            owned_source,
-                            CacheEntry {
-                                state,
-                                last_used: clock,
-                            },
-                        );
-                    }
-                    if let Some(callback) = on_complete {
+                    let stored = cache.lock().complete(&job, state);
+                    if stored && let Some(callback) = &on_complete {
                         callback();
                     }
                 }
             })
             .detach();
-
-        None
     }
 }
 
@@ -1175,6 +1354,7 @@ fn load_font_bytes(font_id: FontId) -> Option<Vec<u8>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::AppContext as _;
 
     #[test]
     fn sanitize_reverses_prettier_underscore_escape() {
@@ -1193,58 +1373,199 @@ mod tests {
         ));
     }
 
-    fn insert_for_test(cache: &mut FormulaCache, source: &str, state: CacheState) {
-        let clock = cache.tick();
-        cache.entries(false).insert(
-            source.to_string(),
-            CacheEntry {
-                state,
-                last_used: clock,
-            },
-        );
-    }
-
-    fn failed_entry() -> CacheState {
+    fn failed_state() -> CacheState {
         CacheState::Ready(Err(Arc::new("unused".to_string())))
     }
 
-    #[test]
-    fn cache_evicts_the_least_recently_used_entries() {
-        let mut cache = FormulaCache::default();
-        for index in 0..=MAX_CACHE_ENTRIES {
-            insert_for_test(&mut cache, &format!("x^{index}"), failed_entry());
+    /// Requests `sources` in one pass, then finishes every queued job.
+    fn request_pass(cache: &mut FormulaCache, sources: &[String]) {
+        cache.begin_pass();
+        for source in sources {
+            cache.request(source, false);
         }
-        cache.evict_if_needed();
+        cache.end_pass();
+        while let Some(job) = cache.next_job() {
+            cache.complete(&job, failed_state());
+        }
+    }
 
-        assert!(cache.inline.len() < MAX_CACHE_ENTRIES);
+    fn numbered(range: std::ops::Range<usize>) -> Vec<String> {
+        range.map(|index| format!("x^{{{index}}}")).collect()
+    }
+
+    #[test]
+    fn cache_keeps_every_entry_requested_by_the_current_pass() {
+        let mut cache = FormulaCache::default();
+        let sources = numbered(0..MAX_CACHE_ENTRIES + 100);
+        request_pass(&mut cache, &sources);
+        request_pass(&mut cache, &sources);
+        assert_eq!(cache.len(), sources.len());
+    }
+
+    #[test]
+    fn cache_evicts_stale_entries_oldest_first() {
+        let mut cache = FormulaCache::default();
+        request_pass(&mut cache, &numbered(0..MAX_CACHE_ENTRIES + 1));
+        let newest = format!("x^{{{MAX_CACHE_ENTRIES}}}");
+        request_pass(&mut cache, std::slice::from_ref(&newest));
+
+        assert!(cache.len() <= MAX_CACHE_ENTRIES - CACHE_EVICTION_BATCH);
+        assert!(!cache.inline.contains_key("x^{0}"), "oldest entry survived");
         assert!(
-            !cache.inline.contains_key("x^0"),
-            "the oldest entry should be gone"
+            cache.inline.contains_key(&newest),
+            "requested entry evicted"
         );
         assert!(
-            cache.inline.contains_key(&format!("x^{MAX_CACHE_ENTRIES}")),
-            "the newest entry should survive"
+            cache
+                .inline
+                .contains_key(&format!("x^{{{}}}", MAX_CACHE_ENTRIES - 1)),
+            "recently used entry evicted"
         );
     }
 
     #[test]
-    fn cache_keeps_pending_entries_through_eviction() {
+    fn queued_jobs_for_evicted_formulas_are_skipped() {
         let mut cache = FormulaCache::default();
-        insert_for_test(&mut cache, "pending", CacheState::Pending);
-        for index in 0..=MAX_CACHE_ENTRIES {
-            insert_for_test(&mut cache, &format!("x^{index}"), failed_entry());
+        cache.begin_pass();
+        cache.request("abandoned", false);
+        cache.end_pass();
+        // The document moves on before the job runs, and the stale entry is evicted.
+        cache.begin_pass();
+        for source in numbered(0..MAX_CACHE_ENTRIES + 1) {
+            cache.request(&source, false);
         }
-        cache.evict_if_needed();
+        cache.end_pass();
+        assert!(!cache.inline.contains_key("abandoned"));
 
-        assert!(cache.inline.contains_key("pending"));
+        let mut started = Vec::new();
+        while let Some(job) = cache.next_job() {
+            started.push(job.source.clone());
+            cache.complete(&job, failed_state());
+        }
+        assert!(!started.iter().any(|source| source == "abandoned"));
+        assert_eq!(started.len(), MAX_CACHE_ENTRIES + 1);
+        assert_eq!(cache.workers, 0);
     }
 
     #[test]
     fn cache_separates_inline_and_display_layouts() {
         let mut cache = FormulaCache::default();
-        insert_for_test(&mut cache, r"\sum_{i=0}^n i", failed_entry());
+        cache.request(r"\sum_{i=0}^n i", false);
         assert!(cache.entries(false).contains_key(r"\sum_{i=0}^n i"));
         assert!(!cache.entries(true).contains_key(r"\sum_{i=0}^n i"));
+    }
+
+    struct TestHost;
+
+    fn test_renderer(cx: &mut gpui::TestAppContext) -> (gpui::Entity<TestHost>, LatexRenderer) {
+        let host = cx.new(|_| TestHost);
+        let executor = cx.executor();
+        let renderer = host.update(cx, |_, cx| LatexRenderer::for_view(executor, cx));
+        (host, renderer)
+    }
+
+    fn synthetic_formula(index: usize) -> String {
+        format!("r_{{{index}}} = {index} + 1")
+    }
+
+    /// Requests every formula inside one pass and returns how many were not ready.
+    fn render_pass(renderer: &LatexRenderer, formulas: &[String], display: bool) -> usize {
+        let _pass = renderer.begin_render_pass();
+        formulas
+            .iter()
+            .filter(|formula| renderer.render(formula, display).is_none())
+            .count()
+    }
+
+    #[gpui::test]
+    fn working_set_larger_than_the_cache_survives_its_own_pass(cx: &mut gpui::TestAppContext) {
+        let (_host, renderer) = test_renderer(cx);
+        let formulas: Vec<String> = (0..MAX_CACHE_ENTRIES + 100)
+            .map(synthetic_formula)
+            .collect();
+
+        // In the app, background parses finish while the first pass is still
+        // walking the document, so early formulas are ready before late ones
+        // are inserted.
+        {
+            let _pass = renderer.begin_render_pass();
+            for (index, formula) in formulas.iter().enumerate() {
+                renderer.render(formula, false);
+                if index % 50 == 49 {
+                    cx.run_until_parked();
+                }
+            }
+        }
+        cx.run_until_parked();
+        assert_eq!(render_pass(&renderer, &formulas, false), 0);
+
+        let settled = renderer.stats();
+        assert_eq!(settled.pending_formulas, 0);
+        assert_eq!(
+            settled.jobs_started,
+            formulas.len() as u64,
+            "every formula should be parsed exactly once"
+        );
+        assert!(settled.cached_formulas >= formulas.len());
+
+        assert_eq!(render_pass(&renderer, &formulas, false), 0);
+        cx.run_until_parked();
+        assert_eq!(
+            renderer.stats().jobs_started,
+            settled.jobs_started,
+            "an unchanged pass must not start new jobs"
+        );
+    }
+
+    #[gpui::test]
+    fn stale_entries_are_pruned_back_to_the_soft_limit(cx: &mut gpui::TestAppContext) {
+        let (_host, renderer) = test_renderer(cx);
+        let formulas: Vec<String> = (0..MAX_CACHE_ENTRIES + 100)
+            .map(synthetic_formula)
+            .collect();
+        render_pass(&renderer, &formulas, false);
+        cx.run_until_parked();
+        assert!(renderer.stats().cached_formulas > MAX_CACHE_ENTRIES);
+
+        // The document shrinks to a few formulas it already had.
+        let remaining = &formulas[..10];
+        assert_eq!(render_pass(&renderer, remaining, false), 0);
+        let stats = renderer.stats();
+        assert!(
+            stats.cached_formulas <= MAX_CACHE_ENTRIES,
+            "cache should return to its soft limit, holds {}",
+            stats.cached_formulas
+        );
+        assert_eq!(render_pass(&renderer, remaining, false), 0);
+        assert_eq!(renderer.stats().jobs_started, formulas.len() as u64);
+    }
+
+    #[gpui::test]
+    fn pending_entries_are_deduplicated(cx: &mut gpui::TestAppContext) {
+        let (_host, renderer) = test_renderer(cx);
+        let formula = vec![synthetic_formula(7); 3];
+        assert_eq!(render_pass(&renderer, &formula, false), 3);
+        cx.run_until_parked();
+        assert_eq!(renderer.stats().jobs_started, 1);
+        assert_eq!(render_pass(&renderer, &formula, false), 0);
+    }
+
+    #[gpui::test]
+    fn inline_and_display_layouts_are_cached_separately(cx: &mut gpui::TestAppContext) {
+        let (_host, renderer) = test_renderer(cx);
+        let formula = vec![r"\sum_{i=0}^n i".to_string()];
+        render_pass(&renderer, &formula, false);
+        render_pass(&renderer, &formula, true);
+        cx.run_until_parked();
+        let stats = renderer.stats();
+        assert_eq!(stats.jobs_started, 2);
+        assert_eq!(stats.cached_formulas, 2);
+        let inline = renderer.render(&formula[0], false).and_then(Result::ok);
+        let display = renderer.render(&formula[0], true).and_then(Result::ok);
+        let (Some(inline), Some(display)) = (inline, display) else {
+            panic!("both layouts should be ready");
+        };
+        assert_ne!(inline.metrics.height, display.metrics.height);
     }
 
     #[test]
