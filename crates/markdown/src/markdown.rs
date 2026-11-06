@@ -6423,7 +6423,8 @@ mod tests {
             .map(|line| line.layout.wrapped_text())
             .collect();
         assert!(words.len() > 4, "expected a child per word, got {words:?}");
-        assert_eq!(words.concat(), "a push adds an offset  to the turn");
+        // The formula contributes only its zero-width source anchor.
+        assert_eq!(words.concat(), "a push adds an offset \u{200B} to the turn");
     }
 
     #[gpui::test]
