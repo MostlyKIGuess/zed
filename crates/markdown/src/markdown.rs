@@ -2805,6 +2805,11 @@ impl Element for MarkdownElement {
                 markdown.latex_renderer.clone(),
             )
         };
+        // Every formula requested by this walk is the document's working set;
+        // the pass keeps the cache from evicting any of them mid-layout.
+        let _latex_render_pass = latex_renderer
+            .as_ref()
+            .map(|latex_renderer| latex_renderer.begin_render_pass());
         let mut builder = MarkdownElementBuilder::new(
             &self.style.container_style,
             self.style.base_text_style.clone(),
@@ -6423,7 +6428,98 @@ mod tests {
             .map(|line| line.layout.wrapped_text())
             .collect();
         assert!(words.len() > 4, "expected a child per word, got {words:?}");
-        assert_eq!(words.concat(), "a push adds an offset  to the turn");
+        // The formula contributes only its zero-width source anchor.
+        assert_eq!(words.concat(), "a push adds an offset \u{200B} to the turn");
+    }
+
+    /// A synthetic document with more unique formulas than the renderer's cache holds.
+    fn math_heavy_markdown() -> String {
+        let mut source = String::from("# Math-heavy document\n\n");
+        for index in 0..25 {
+            source.push_str(&format!(
+                "$$d_{{{index}}} = \\sum_{{k=0}}^{{{}}} (k + {index})^2$$\n\n",
+                index + 1
+            ));
+        }
+        let inline: Vec<String> = (0..563)
+            .map(|index| format!("$r_{{{index}}} = {index} + 1$"))
+            .collect();
+        for line in inline.chunks(8) {
+            source.push_str(&line.join(" "));
+            source.push_str("\n\n");
+        }
+        source
+    }
+
+    #[gpui::test]
+    fn test_math_heavy_document_reaches_a_stable_rendered_state(cx: &mut TestAppContext) {
+        ensure_theme_initialized(cx);
+        let source = math_heavy_markdown();
+        let markdown = cx.new(|cx| {
+            Markdown::new_with_options(
+                source.into(),
+                None,
+                None,
+                MarkdownOptions {
+                    render_math: true,
+                    ..Default::default()
+                },
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        let (renderer, unique_formulas) = markdown.read_with(cx, |markdown, _| {
+            let formulas: HashSet<(bool, String)> = markdown
+                .parsed_markdown
+                .events
+                .iter()
+                .filter_map(|(_, event)| match event {
+                    MarkdownEvent::Math { display, content } => {
+                        Some((*display, content.trim().to_string()))
+                    }
+                    _ => None,
+                })
+                .collect();
+            (markdown.latex_renderer.clone(), formulas.len())
+        });
+        let renderer = renderer.expect("math rendering is enabled");
+        assert_eq!(unique_formulas, 588);
+
+        let (_, cx) = cx.add_window_view(move |_, _| MarkdownTestView {
+            markdown,
+            style: MarkdownStyle::default(),
+            code_span_link: None,
+            rendered_text: Rc::default(),
+        });
+        let layout = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+        };
+
+        cx.run_until_parked();
+        layout(cx);
+        let settled = renderer.stats();
+        assert_eq!(settled.pending_formulas, 0, "every formula should be ready");
+        assert_eq!(
+            settled.jobs_started, unique_formulas as u64,
+            "each unique formula should be parsed once"
+        );
+        assert!(settled.cached_formulas >= unique_formulas);
+        assert!(
+            settled.notifications <= 8,
+            "notifications should be bounded by batches, got {} for {unique_formulas} formulas",
+            settled.notifications
+        );
+
+        layout(cx);
+        let unchanged = renderer.stats();
+        assert_eq!(
+            unchanged.jobs_started, settled.jobs_started,
+            "an unchanged layout must not start new jobs"
+        );
+        assert_eq!(unchanged.pending_formulas, 0, "no placeholder may return");
+        assert_eq!(unchanged.notifications, settled.notifications);
     }
 
     #[gpui::test]
